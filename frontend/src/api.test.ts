@@ -11,4 +11,11 @@ describe("API error mapping", () => {
   it("gives an actionable retry message for a network interruption", () => {
     expect(errorMessage(new Error("offline"))).toContain("输入已保留");
   });
+
+  it("maps the rejection race errors for both adjudication outcomes", () => {
+    expect(errorMessage(new ApiError("HANDOFF_REJECTED", "x", false))).toContain("已被夜班拒收");
+    expect(errorMessage(new ApiError("HANDOFF_ALREADY_RECEIVED", "x", false))).toContain(
+      "已确认接收",
+    );
+  });
 });

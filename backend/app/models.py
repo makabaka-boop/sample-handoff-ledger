@@ -81,6 +81,10 @@ class Handoff(Base):
     created_by: Mapped[str] = mapped_column(String(100), nullable=False)
     received_by: Mapped[str | None] = mapped_column(String(100))
     cancelled_by: Mapped[str | None] = mapped_column(String(100))
+    rejected_by: Mapped[str | None] = mapped_column(String(100))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reject_reason: Mapped[str | None] = mapped_column(String(40))
+    reject_note: Mapped[str | None] = mapped_column(Text)
     status: Mapped[HandoffStatus] = mapped_column(
         Enum(HandoffStatus, native_enum=False), default=HandoffStatus.PENDING, nullable=False
     )

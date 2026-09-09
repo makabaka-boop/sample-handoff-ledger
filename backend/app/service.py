@@ -29,13 +29,14 @@ from .schemas import (
     HandoffRead,
     LocationRead,
     MarkAnomalyRequest,
+    RejectRequest,
     ReopenRequest,
     ResolveAnomalyRequest,
     TimelineRead,
 )
 from .security import code_digest, generate_code
 
-_sqlite_confirmation_locks: dict[str, threading.Lock] = {}
+_sqlite_code_action_locks: dict[str, threading.Lock] = {}
 _sqlite_locks_guard = threading.Lock()
 
 
@@ -144,6 +145,10 @@ def _handoff_read(
         created_by=handoff.created_by,
         received_by=handoff.received_by,
         cancelled_by=handoff.cancelled_by,
+        rejected_by=handoff.rejected_by,
+        rejected_at=handoff.rejected_at,
+        reject_reason=handoff.reject_reason,
+        reject_note=handoff.reject_note,
         status=effective,
         persisted_status=handoff.status,
         created_at=handoff.created_at,
@@ -524,18 +529,29 @@ def _apply_location_move(container: Container, destination: Location, now: datet
     container.updated_at = now
 
 
-def _confirmation_lock(db: Session, digest: str) -> threading.Lock | None:
+def _settle_return_to_source(
+    container: Container, source: Location, destination: Location, now: datetime
+) -> None:
+    # A rejected or cancelled cold-to-warm handoff sends the container back to
+    # its cold source; settle the out-of-storage segment that began at initiation.
+    if source.is_cold_storage and not destination.is_cold_storage and container.out_since:
+        container.accumulated_out_seconds += _seconds(container.out_since, now)
+        container.out_since = None
+        container.updated_at = now
+
+
+def _code_action_lock(db: Session, digest: str) -> threading.Lock | None:
     if db.bind is None or db.bind.dialect.name != "sqlite":
         return None
     with _sqlite_locks_guard:
-        return _sqlite_confirmation_locks.setdefault(digest, threading.Lock())
+        return _sqlite_code_action_locks.setdefault(digest, threading.Lock())
 
 
 def confirm_handoff(
     db: Session, payload: ConfirmRequest, clock: Clock, settings: Settings
 ) -> HandoffRead:
     digest = code_digest(payload.code, settings.handoff_signing_key)
-    local_lock = _confirmation_lock(db, digest)
+    local_lock = _code_action_lock(db, digest)
     if local_lock:
         local_lock.acquire()
     try:
@@ -554,6 +570,15 @@ def confirm_handoff(
                 replayed = True
             elif handoff.status == HandoffStatus.CANCELLED:
                 raise DomainError(409, "HANDOFF_CANCELLED", "This handoff was cancelled.")
+            elif (
+                handoff.status == HandoffStatus.ANOMALY
+                and handoff.anomaly_reason == "RECEIVER_REJECTED"
+            ):
+                raise DomainError(
+                    409,
+                    "HANDOFF_REJECTED",
+                    "The receiving shift rejected this handoff; reopen it to issue a new code.",
+                )
             elif handoff.status == HandoffStatus.ANOMALY:
                 raise DomainError(
                     409,
@@ -623,6 +648,107 @@ def confirm_handoff(
             local_lock.release()
 
 
+def reject_handoff(
+    db: Session, payload: RejectRequest, clock: Clock, settings: Settings
+) -> HandoffRead:
+    digest = code_digest(payload.code, settings.handoff_signing_key)
+    local_lock = _code_action_lock(db, digest)
+    if local_lock:
+        local_lock.acquire()
+    try:
+        deferred_error: DomainError | None = None
+        replayed = False
+        handoff_id: str | None = None
+        with db.begin():
+            handoff = db.scalar(
+                select(Handoff).where(Handoff.code_digest == digest).with_for_update()
+            )
+            if handoff is None:
+                raise DomainError(404, "INVALID_RECEIPT_CODE", "Receipt code was not found.")
+            now = clock.now()
+            handoff_id = handoff.id
+            if handoff.status == HandoffStatus.RECEIVED:
+                raise DomainError(
+                    409,
+                    "HANDOFF_ALREADY_RECEIVED",
+                    "This handoff was already received; a rejection can no longer win.",
+                )
+            if handoff.status == HandoffStatus.CANCELLED:
+                raise DomainError(409, "HANDOFF_CANCELLED", "This handoff was cancelled.")
+            if (
+                handoff.status == HandoffStatus.ANOMALY
+                and handoff.anomaly_reason == "RECEIVER_REJECTED"
+            ):
+                # Idempotent replay: repeat submissions return the first rejection fact.
+                replayed = True
+            elif handoff.status == HandoffStatus.ANOMALY:
+                raise DomainError(
+                    409,
+                    "HANDOFF_ANOMALY",
+                    "This handoff is anomalous and must be resolved or reopened.",
+                )
+            elif _aware(handoff.expires_at) <= now:
+                _mark_anomaly(db, handoff, now, "system", "HANDOFF_EXPIRED")
+                deferred_error = DomainError(
+                    410,
+                    "HANDOFF_EXPIRED",
+                    "The server-side receipt deadline has passed; reopen the handoff.",
+                )
+            else:
+                # Same adjudication order as confirmation: handoff, container, batch.
+                container = db.scalar(
+                    select(Container).where(Container.id == handoff.container_id).with_for_update()
+                )
+                batch = db.scalar(
+                    select(Batch).where(Batch.id == handoff.batch_id).with_for_update()
+                )
+                source = db.get(Location, handoff.from_location_id)
+                destination = db.get(Location, handoff.to_location_id)
+                assert container is not None and batch is not None
+                assert source is not None and destination is not None
+                if container.current_location_id != handoff.from_location_id:
+                    _mark_anomaly(db, handoff, now, "system", "LOCATION_MISMATCH")
+                    deferred_error = DomainError(
+                        409,
+                        "LOCATION_MISMATCH",
+                        "The container is no longer at the recorded source.",
+                    )
+                else:
+                    handoff.status = HandoffStatus.ANOMALY
+                    handoff.anomaly_at = now
+                    handoff.anomaly_reason = "RECEIVER_REJECTED"
+                    handoff.rejected_by = payload.rejected_by
+                    handoff.rejected_at = now
+                    handoff.reject_reason = payload.reason
+                    handoff.reject_note = payload.note
+                    batch.disposition = BatchDisposition.REVIEW
+                    # The container stays at its source; a cold-to-warm removal is
+                    # settled as a return so the exposure segment stops accruing.
+                    _settle_return_to_source(container, source, destination, now)
+                    _event(
+                        db,
+                        batch_id=batch.id,
+                        container_id=container.id,
+                        handoff_id=handoff.id,
+                        event_type="handoff_rejected",
+                        actor=payload.rejected_by,
+                        at=now,
+                        details={
+                            "reason": payload.reason,
+                            "from": source.code,
+                            "to": destination.code,
+                        },
+                        note=payload.note,
+                    )
+        if deferred_error:
+            raise deferred_error
+        assert handoff_id is not None
+        return get_handoff(db, handoff_id, clock, replayed=replayed)
+    finally:
+        if local_lock:
+            local_lock.release()
+
+
 def cancel_handoff(
     db: Session, handoff_id: str, payload: CancelRequest, clock: Clock
 ) -> HandoffRead:
@@ -655,10 +781,7 @@ def cancel_handoff(
             source = db.get(Location, handoff.from_location_id)
             destination = db.get(Location, handoff.to_location_id)
             assert container is not None and source is not None and destination is not None
-            if source.is_cold_storage and not destination.is_cold_storage and container.out_since:
-                container.accumulated_out_seconds += _seconds(container.out_since, now)
-                container.out_since = None
-                container.updated_at = now
+            _settle_return_to_source(container, source, destination, now)
             _event(
                 db,
                 batch_id=handoff.batch_id,

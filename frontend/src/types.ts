@@ -42,6 +42,12 @@ export interface TimelineEvent {
   note: string | null;
 }
 
+export type RejectReason =
+  | "seal_broken"
+  | "label_mismatch"
+  | "package_contaminated"
+  | "other";
+
 export interface Handoff {
   id: string;
   batch_id: string;
@@ -53,6 +59,10 @@ export interface Handoff {
   created_by: string;
   received_by: string | null;
   cancelled_by: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  reject_reason: RejectReason | null;
+  reject_note: string | null;
   status: Status;
   persisted_status: Status;
   created_at: string;

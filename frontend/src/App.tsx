@@ -1,9 +1,24 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "./api";
 import { createServerCountdown, formatDuration } from "./time";
-import type { Batch, Handoff, Location } from "./types";
+import type { Batch, Handoff, Location, RejectReason } from "./types";
 
 type View = "tasks" | "receive" | "batches";
+type ReceiveMode = "confirm" | "reject";
+
+const rejectReasons: { value: RejectReason; label: string }[] = [
+  { value: "seal_broken", label: "容器封签破损" },
+  { value: "label_mismatch", label: "标签不符" },
+  { value: "package_contaminated", label: "包装污染" },
+  { value: "other", label: "其他异常" },
+];
+
+export const rejectReasonLabel: Record<RejectReason, string> = {
+  seal_broken: "容器封签破损",
+  label_mismatch: "标签不符",
+  package_contaminated: "包装污染",
+  other: "其他异常",
+};
 
 const statusLabel = {
   pending: "等待接收",
@@ -59,6 +74,9 @@ function HandoffCard({ item, onOpen }: { item: Handoff; onOpen: () => void }) {
 export function ReceivePanel({ onDone }: { onDone: () => void }) {
   const [code, setCode] = useState("");
   const [receiver, setReceiver] = useState("");
+  const [mode, setMode] = useState<ReceiveMode>("confirm");
+  const [reason, setReason] = useState<RejectReason>("seal_broken");
+  const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
@@ -67,21 +85,36 @@ export function ReceivePanel({ onDone }: { onDone: () => void }) {
     setBusy(true);
     setNotice(null);
     try {
-      const result = await api.confirm(code, receiver);
-      setNotice({
-        kind: "ok",
-        text: result.replayed
-          ? `已确认：${result.container_label} 早前已接收，当前位置未重复变更。`
-          : `接收成功：${result.container_label} 已到达${result.to_location.name}。`,
-      });
+      if (mode === "confirm") {
+        const result = await api.confirm(code, receiver);
+        setNotice({
+          kind: "ok",
+          text: result.replayed
+            ? `已确认：${result.container_label} 早前已接收，当前位置未重复变更。`
+            : `接收成功：${result.container_label} 已到达${result.to_location.name}。`,
+        });
+      } else {
+        const result = await api.reject(code, receiver, reason, note);
+        setNotice({
+          kind: "ok",
+          text: result.replayed
+            ? `已记录：${result.container_label} 的早前拒收仍然有效，未重复写入。`
+            : `拒收已记录：${result.container_label} 留在${result.from_location.name}，批次进入复核。`,
+        });
+      }
       setCode("");
+      setReceiver("");
+      setNote("");
       onDone();
     } catch (error) {
+      // Failure or offline must preserve every field so the shift can retry as-is.
       setNotice({ kind: "error", text: errorMessage(error) });
     } finally {
       setBusy(false);
     }
   }
+
+  const rejecting = mode === "reject";
 
   return (
     <section className="receive-layout">
@@ -90,8 +123,31 @@ export function ReceivePanel({ onDone }: { onDone: () => void }) {
         <h2>输入六位交接码</h2>
         <p>位置只有在服务器确认事务完成后才会更新。断网或冲突不会清空你的输入。</p>
         <div className="trust-note"><span>✓</span> 截止时间由服务器判定，本机时钟不会改变结果</div>
+        <div className="trust-note"><span>✓</span> 拒收与确认在同一事务中裁决，容器不会被移动</div>
       </div>
       <form className="receive-form" onSubmit={submit}>
+        <div className="mode-toggle" role="radiogroup" aria-label="接收动作">
+          <label className={mode === "confirm" ? "selected" : ""}>
+            <input
+              type="radio"
+              name="receive-mode"
+              value="confirm"
+              checked={mode === "confirm"}
+              onChange={() => setMode("confirm")}
+            />
+            确认接收
+          </label>
+          <label className={mode === "reject" ? "selected reject" : "reject"}>
+            <input
+              type="radio"
+              name="receive-mode"
+              value="reject"
+              checked={mode === "reject"}
+              onChange={() => setMode("reject")}
+            />
+            拒绝接收
+          </label>
+        </div>
         <label htmlFor="receipt-code">接收码</label>
         <input
           id="receipt-code"
@@ -105,11 +161,33 @@ export function ReceivePanel({ onDone }: { onDone: () => void }) {
           onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))}
           required
         />
-        <label htmlFor="receiver">接收人</label>
+        <label htmlFor="receiver">{rejecting ? "拒收人" : "接收人"}</label>
         <input id="receiver" value={receiver} onChange={(e) => setReceiver(e.target.value)} required />
+        {rejecting && <>
+          <label htmlFor="reject-reason">拒收原因</label>
+          <select
+            id="reject-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value as RejectReason)}
+            required
+          >
+            {rejectReasons.map((item) => (
+              <option value={item.value} key={item.value}>{item.label}</option>
+            ))}
+          </select>
+          <label htmlFor="reject-note">备注</label>
+          <textarea
+            id="reject-note"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            maxLength={2000}
+            rows={3}
+            placeholder="描述封签、标签或包装的现场情况（可选）"
+          />
+        </>}
         {notice && <div role="alert" className={`notice ${notice.kind}`}>{notice.text}</div>}
-        <button className="primary" disabled={busy || code.length !== 6}>
-          {busy ? "正在由服务器裁决…" : "确认接收"}
+        <button className={rejecting ? "danger" : "primary"} disabled={busy || code.length !== 6}>
+          {busy ? "正在由服务器裁决…" : rejecting ? "拒绝接收并形成异常" : "确认接收"}
         </button>
       </form>
     </section>
@@ -271,7 +349,20 @@ function DetailDrawer({ handoff, batch, close, refresh, showCode }: {
             <Metric label="交接时限" value={handoff.status === "pending" ? `${handoff.remaining_seconds} 秒` : statusLabel[handoff.status]} warning={handoff.status === "anomaly"} />
             <Metric label="累计离柜" value={formatDuration(handoff.exposure_seconds)} warning={handoff.exposure_exceeded} />
           </div>
-          <dl><dt>发起人</dt><dd>{handoff.created_by}</dd><dt>接收人</dt><dd>{handoff.received_by ?? "—"}</dd><dt>异常原因</dt><dd>{handoff.anomaly_reason ?? "—"}</dd></dl>
+          <dl>
+            <dt>发起人</dt><dd>{handoff.created_by}</dd>
+            <dt>接收人</dt><dd>{handoff.received_by ?? "—"}</dd>
+            <dt>拒收人</dt>
+            <dd>
+              {handoff.rejected_by
+                ? `${handoff.rejected_by}${handoff.rejected_at ? ` · ${new Date(handoff.rejected_at).toLocaleString("zh-CN")}` : ""}`
+                : "—"}
+            </dd>
+            <dt>拒收原因</dt>
+            <dd>{handoff.reject_reason ? rejectReasonLabel[handoff.reject_reason] : "—"}</dd>
+            <dt>拒收备注</dt><dd>{handoff.reject_note ?? "—"}</dd>
+            <dt>异常原因</dt><dd>{handoff.anomaly_reason ?? "—"}</dd>
+          </dl>
           {(handoff.status === "pending" || handoff.status === "anomaly") && <div className="actions"><input placeholder="操作人" value={actor} onChange={(e) => setActor(e.target.value)} />{handoff.status === "pending" ? <button onClick={() => action("cancel")}>撤销交接</button> : <><button className="primary" onClick={() => action("reopen")}>重开交接</button><select aria-label="异常处置" value={decision} onChange={(e) => setDecision(e.target.value)}><option value="isolate">隔离</option><option value="review">复核</option><option value="release">放行</option></select><input placeholder="处置说明" value={decisionNote} onChange={(e) => setDecisionNote(e.target.value)} /><button disabled={!decisionNote} onClick={() => action("resolve")}>记录处置</button></>}</div>}
         </>}
         {batch && <>

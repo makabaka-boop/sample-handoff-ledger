@@ -100,6 +100,7 @@ def upgrade() -> None:
         ["container_id"],
         unique=True,
         postgresql_where=sa.text("status = 'PENDING'"),
+        sqlite_where=sa.text("status = 'PENDING'"),
     )
     op.create_table(
         "timeline_events",

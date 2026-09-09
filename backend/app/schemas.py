@@ -97,6 +97,28 @@ class ConfirmRequest(BaseModel):
     received_by: str = Field(min_length=1, max_length=100)
 
 
+RejectReason = Literal[
+    "seal_broken",
+    "label_mismatch",
+    "package_contaminated",
+    "other",
+]
+
+
+class RejectRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+    rejected_by: str = Field(min_length=1, max_length=100)
+    reason: RejectReason
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("note")
+    @classmethod
+    def empty_note_to_none(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            return None
+        return value
+
+
 class CancelRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
 
@@ -128,6 +150,10 @@ class HandoffRead(BaseModel):
     created_by: str
     received_by: str | None
     cancelled_by: str | None
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
+    reject_reason: str | None = None
+    reject_note: str | None = None
     status: HandoffStatus
     persisted_status: HandoffStatus
     created_at: datetime

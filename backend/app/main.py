@@ -21,6 +21,7 @@ from .schemas import (
     LocationCreate,
     LocationRead,
     MarkAnomalyRequest,
+    RejectRequest,
     ReopenRequest,
     ResolveAnomalyRequest,
 )
@@ -36,6 +37,7 @@ from .service import (
     list_handoffs,
     list_locations,
     mark_anomaly,
+    reject_handoff,
     reopen_handoff,
     resolve_anomaly,
 )
@@ -111,6 +113,11 @@ def handoff_detail(handoff_id: str, db: Session = Depends(get_db)):
 @app.post("/api/handoffs/confirm", response_model=HandoffRead)
 def confirm(payload: ConfirmRequest, db: Session = Depends(get_db)):
     return confirm_handoff(db, payload, clock, settings)
+
+
+@app.post("/api/handoffs/reject", response_model=HandoffRead)
+def reject(payload: RejectRequest, db: Session = Depends(get_db)):
+    return reject_handoff(db, payload, clock, settings)
 
 
 @app.post("/api/handoffs/{handoff_id}/cancel", response_model=HandoffRead)
