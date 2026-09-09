@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sample-handoff-ledger"
+version = "1.0.0"
+description = "Transactional sample handoff ledger API"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic==1.14.1",
+  "fastapi==0.115.8",
+  "psycopg[binary]==3.2.4",
+  "pydantic-settings==2.7.1",
+  "sqlalchemy==2.0.38",
+  "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "pytest==8.3.4",
+  "pytest-cov==6.0.0",
+  "ruff==0.9.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["postgres: requires TEST_DATABASE_URL pointing at PostgreSQL"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"] # FastAPI dependency injection intentionally uses Depends in signatures.
