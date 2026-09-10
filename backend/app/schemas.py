@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .models import BatchDisposition, ContainerStatus, HandoffStatus
+from .models import BatchDisposition, ContainerStatus, HandoffStatus, InventoryCheckCategory
 from .temperature import (
     MAX_PLAUSIBLE_C,
     MIN_PLAUSIBLE_C,
@@ -22,6 +22,52 @@ class LocationRead(LocationCreate):
     id: str
 
     model_config = {"from_attributes": True}
+
+
+class InventoryCheckRequest(BaseModel):
+    checked_by: str = Field(min_length=1, max_length=100)
+    labels: list[str] = Field(min_length=1, max_length=1000)
+
+    @field_validator("labels")
+    @classmethod
+    def trimmed_labels(cls, labels: list[str]) -> list[str]:
+        return [label.strip() for label in labels]
+
+
+class InventoryCheckItemRead(BaseModel):
+    id: str
+    category: InventoryCheckCategory
+    scanned_label: str | None
+    line_number: int
+    container_id: str | None
+    batch_id: str | None
+    accession_number: str | None
+    container_label: str | None
+    recorded_location_id: str | None
+    recorded_location_code: str | None
+    recorded_location_name: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class InventoryCheckSummary(BaseModel):
+    id: str
+    location_id: str
+    checked_by: str
+    created_at: datetime
+    matched_count: int
+    missing_count: int
+    misplaced_count: int
+    unknown_count: int
+    scanned_count: int
+    location: LocationRead
+
+
+class InventoryCheckRead(InventoryCheckSummary):
+    items: list[InventoryCheckItemRead]
+
+    # The current check followed by the location's most recent earlier checks.
+    recent_checks: list[InventoryCheckSummary]
 
 
 class ContainerCreate(BaseModel):

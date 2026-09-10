@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, func, select
@@ -16,7 +17,10 @@ from .models import (
     ContainerStatus,
     Handoff,
     HandoffStatus,
+    InventoryCheckCategory,
     Location,
+    LocationInventoryCheck,
+    LocationInventoryCheckItem,
     TemperatureObservation,
     TemperatureVerdict,
     TimelineEvent,
@@ -31,6 +35,9 @@ from .schemas import (
     ContainerReplaceRequest,
     HandoffCreate,
     HandoffRead,
+    InventoryCheckRead,
+    InventoryCheckRequest,
+    InventoryCheckSummary,
     LocationRead,
     MarkAnomalyRequest,
     RejectRequest,
@@ -1188,3 +1195,268 @@ def reopen_handoff(
             details={"successor_id": new.id},
         )
     return get_handoff(db, new.id, clock, receipt_code=code)
+
+
+def _inventory_lock(db: Session, key: str) -> threading.Lock | None:
+    # SELECT ... FOR UPDATE serialises recounts against handoffs on PostgreSQL.
+    # SQLite ignores row locks, so mirror the per-key process lock used elsewhere.
+    if db.bind is None or db.bind.dialect.name != "sqlite":
+        return None
+    with _sqlite_locks_guard:
+        return _sqlite_code_action_locks.setdefault(f"inventory:{key}", threading.Lock())
+
+
+_INVENTORY_CATEGORY_ORDER = {
+    InventoryCheckCategory.MATCHED: 0,
+    InventoryCheckCategory.MISSING: 1,
+    InventoryCheckCategory.MISPLACED: 2,
+    InventoryCheckCategory.UNKNOWN: 3,
+}
+
+
+def _inventory_summary(check: LocationInventoryCheck) -> InventoryCheckSummary:
+    return InventoryCheckSummary(
+        id=check.id,
+        location_id=check.location_id,
+        checked_by=check.checked_by,
+        created_at=check.created_at,
+        matched_count=check.matched_count,
+        missing_count=check.missing_count,
+        misplaced_count=check.misplaced_count,
+        unknown_count=check.unknown_count,
+        scanned_count=check.scanned_count,
+        location=LocationRead.model_validate(check.location),
+    )
+
+
+def _recent_check_summaries(
+    db: Session, location_id: str, *, before: datetime | None = None
+) -> list[LocationInventoryCheck]:
+    statement = (
+        select(LocationInventoryCheck)
+        .where(LocationInventoryCheck.location_id == location_id)
+        .options(selectinload(LocationInventoryCheck.location))
+        .order_by(
+            LocationInventoryCheck.created_at.desc(),
+            LocationInventoryCheck.id.desc(),
+        )
+        .limit(10)
+    )
+    if before is not None:
+        # Only records already visible at submission time, so re-reading an
+        # immutable check never surfaces checks created afterwards.
+        statement = statement.where(LocationInventoryCheck.created_at < before)
+    return list(db.scalars(statement))
+
+
+def create_inventory_check(
+    db: Session, location_id: str, payload: InventoryCheckRequest, clock: Clock
+) -> InventoryCheckRead:
+    """Persist one immutable cold-location recount.
+
+    The location row and the containers recorded there are locked inside the
+    same transaction that snapshots and classifies them, so a concurrent
+    handoff cannot move a container between the snapshot and the verdict. The
+    check only forms evidence: no container, batch, handoff or timeline row is
+    modified.
+    """
+    # Payload verification happens before the transaction opens, so a rejected
+    # submission (blank or duplicate labels) never touches the database.
+    labels = [label.strip() for label in payload.labels]
+    folded_counts = Counter(label.casefold() for label in labels)
+    if any(not label for label in labels) or any(count > 1 for count in folded_counts.values()):
+        raise DomainError(
+            422,
+            "INVALID_INVENTORY_LABELS",
+            "Labels must not be blank or duplicated within one recount.",
+            details={
+                "blank": [index + 1 for index, label in enumerate(labels) if not label],
+                "duplicated": sorted(
+                    {label for label in labels if folded_counts[label.casefold()] > 1}
+                ),
+            },
+        )
+
+    local_lock = _inventory_lock(db, location_id)
+    if local_lock:
+        local_lock.acquire()
+    check_id = ""
+    try:
+        now = clock.now()
+        with db.begin():
+            # Lock the location first; the handoff transactions lock container
+            # then batch rows, and inventory never writes them, so the lock
+            # orders do not create a write/write deadlock.
+            location = db.scalar(
+                select(Location).where(Location.id == location_id).with_for_update()
+            )
+            if location is None:
+                raise DomainError(404, "LOCATION_NOT_FOUND", "Location does not exist.")
+            if not location.is_cold_storage:
+                raise DomainError(
+                    409,
+                    "LOCATION_NOT_COLD_STORAGE",
+                    "Only cold-storage locations can be inventoried.",
+                    details={"location_id": location.id, "code": location.code},
+                )
+
+            # Only containers still in circulation are part of the book snapshot.
+            at_location = list(
+                db.scalars(
+                    select(Container)
+                    .where(
+                        Container.current_location_id == location.id,
+                        Container.status == ContainerStatus.ACTIVE,
+                    )
+                    .with_for_update()
+                    .order_by(Container.id)
+                )
+            )
+            batch_ids = {container.batch_id for container in at_location}
+            batches = {
+                batch.id: batch
+                for batch in db.scalars(select(Batch).where(Batch.id.in_(batch_ids)))
+            }
+            # The whole active container index resolves scanned labels: a label
+            # found here is matched, elsewhere means misplaced here, nowhere
+            # means unknown.
+            all_active = list(
+                db.scalars(
+                    select(Container).where(Container.status == ContainerStatus.ACTIVE)
+                )
+            )
+            by_folded_label: dict[str, list[Container]] = {}
+            for container in all_active:
+                by_folded_label.setdefault(container.label.casefold(), []).append(container)
+            locations = {
+                item.id: item for item in db.scalars(select(Location))
+            }
+            all_batch_ids = {container.batch_id for container in all_active}
+            all_batches = {
+                batch.id: batch
+                for batch in db.scalars(select(Batch).where(Batch.id.in_(all_batch_ids)))
+            }
+
+            scanned_folded = {label.casefold() for label in labels}
+
+            def make_item(category: InventoryCheckCategory, **fields) -> LocationInventoryCheckItem:
+                return LocationInventoryCheckItem(category=category, **fields)
+
+            rows: list[LocationInventoryCheckItem] = []
+
+            # Scanned labels, in scan order.
+            for line, label in enumerate(labels, start=1):
+                candidates = by_folded_label.get(label.casefold(), [])
+                if not candidates:
+                    rows.append(
+                        make_item(
+                            InventoryCheckCategory.UNKNOWN,
+                            scanned_label=label,
+                            line_number=line,
+                        )
+                    )
+                    continue
+                here = [c for c in candidates if c.current_location_id == location.id]
+                # Deterministic tie-break if the same label exists in several
+                # batches: prefer the one recorded at the scanned location.
+                chosen = sorted(here or candidates, key=lambda c: c.id)[0]
+                recorded = locations[chosen.current_location_id]
+                batch = all_batches[chosen.batch_id]
+                if chosen.current_location_id == location.id:
+                    category = InventoryCheckCategory.MATCHED
+                else:
+                    category = InventoryCheckCategory.MISPLACED
+                rows.append(
+                    make_item(
+                        category,
+                        scanned_label=label,
+                        line_number=line,
+                        container_id=chosen.id,
+                        batch_id=chosen.batch_id,
+                        accession_number=batch.accession_number,
+                        container_label=chosen.label,
+                        recorded_location_id=recorded.id,
+                        recorded_location_code=recorded.code,
+                        recorded_location_name=recorded.name,
+                    )
+                )
+
+            # Book containers at this location that the scan did not list.
+            missing_line = 0
+            for container in at_location:
+                if container.label.casefold() in scanned_folded:
+                    continue
+                missing_line += 1
+                batch = batches[container.batch_id]
+                rows.append(
+                    make_item(
+                        InventoryCheckCategory.MISSING,
+                        scanned_label=None,
+                        line_number=missing_line,
+                        container_id=container.id,
+                        batch_id=container.batch_id,
+                        accession_number=batch.accession_number,
+                        container_label=container.label,
+                        recorded_location_id=location.id,
+                        recorded_location_code=location.code,
+                        recorded_location_name=location.name,
+                    )
+                )
+
+            counts = {category: 0 for category in InventoryCheckCategory}
+            for item in rows:
+                counts[item.category] += 1
+
+            check = LocationInventoryCheck(
+                location_id=location.id,
+                checked_by=payload.checked_by,
+                created_at=now,
+                matched_count=counts[InventoryCheckCategory.MATCHED],
+                missing_count=counts[InventoryCheckCategory.MISSING],
+                misplaced_count=counts[InventoryCheckCategory.MISPLACED],
+                unknown_count=counts[InventoryCheckCategory.UNKNOWN],
+                scanned_count=len(labels),
+            )
+            db.add(check)
+            db.flush()
+            for item in rows:
+                item.check_id = check.id
+                db.add(item)
+            db.flush()
+            check_id = check.id
+    finally:
+        if local_lock:
+            local_lock.release()
+    return get_inventory_check(db, check_id)
+
+
+def get_inventory_check(db: Session, check_id: str) -> InventoryCheckRead:
+    check = db.scalar(
+        select(LocationInventoryCheck)
+        .where(LocationInventoryCheck.id == check_id)
+        .options(
+            selectinload(LocationInventoryCheck.location),
+            selectinload(LocationInventoryCheck.items),
+        )
+    )
+    if check is None:
+        raise DomainError(404, "INVENTORY_CHECK_NOT_FOUND", "Inventory check does not exist.")
+    recent = _recent_check_summaries(db, check.location_id, before=check.created_at)
+    summaries = [_inventory_summary(item) for item in recent if item.id != check.id]
+    return InventoryCheckRead(
+        **_inventory_summary(check).model_dump(),
+        items=sorted(
+            check.items,
+            key=lambda item: (_INVENTORY_CATEGORY_ORDER[item.category], item.line_number),
+        ),
+        recent_checks=summaries,
+    )
+
+
+def list_location_inventory_checks(
+    db: Session, location_id: str
+) -> list[InventoryCheckSummary]:
+    location = db.scalar(select(Location).where(Location.id == location_id))
+    if location is None:
+        raise DomainError(404, "LOCATION_NOT_FOUND", "Location does not exist.")
+    return [_inventory_summary(check) for check in _recent_check_summaries(db, location_id)]

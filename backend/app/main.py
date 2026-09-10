@@ -19,6 +19,9 @@ from .schemas import (
     HandoffCreate,
     HandoffRead,
     HealthRead,
+    InventoryCheckRead,
+    InventoryCheckRequest,
+    InventoryCheckSummary,
     LocationCreate,
     LocationRead,
     MarkAnomalyRequest,
@@ -32,11 +35,14 @@ from .service import (
     confirm_handoff,
     create_batch,
     create_handoff,
+    create_inventory_check,
     create_location,
     get_batch,
     get_handoff,
+    get_inventory_check,
     list_batches,
     list_handoffs,
+    list_location_inventory_checks,
     list_locations,
     mark_anomaly,
     record_temperature_observation,
@@ -79,6 +85,33 @@ def locations(db: Session = Depends(get_db)):
 @app.post("/api/locations", response_model=LocationRead, status_code=status.HTTP_201_CREATED)
 def add_location(payload: LocationCreate, db: Session = Depends(get_db)):
     return create_location(db, payload.code, payload.name, payload.is_cold_storage)
+
+
+@app.get(
+    "/api/locations/{location_id}/inventory-checks",
+    response_model=list[InventoryCheckSummary],
+)
+def location_inventory_checks(location_id: str, db: Session = Depends(get_db)):
+    return list_location_inventory_checks(db, location_id)
+
+
+@app.post(
+    "/api/locations/{location_id}/inventory-checks",
+    response_model=InventoryCheckRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_inventory_check(
+    location_id: str, payload: InventoryCheckRequest, db: Session = Depends(get_db)
+):
+    return create_inventory_check(db, location_id, payload, clock)
+
+
+@app.get(
+    "/api/inventory-checks/{check_id}",
+    response_model=InventoryCheckRead,
+)
+def inventory_check_detail(check_id: str, db: Session = Depends(get_db)):
+    return get_inventory_check(db, check_id)
 
 
 @app.post("/api/batches", response_model=BatchSummary, status_code=status.HTTP_201_CREATED)

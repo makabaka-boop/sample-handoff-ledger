@@ -39,7 +39,7 @@ test("transloading seals the old container, keeps one timeline event and hands o
 
   // The old container is sealed and read-only; the successor is active in place.
   await expect(page.getByText("已封存")).toBeVisible();
-  await expect(page.getByText("可流转")).toBeVisible();
+  await expect(page.getByText("可流转", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "转装替换" })).toHaveCount(1);
 
   // Read the adjudicated state straight back from the real API/PostgreSQL.

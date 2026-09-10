@@ -1,4 +1,12 @@
-import type { Batch, Container, Handoff, Location, TemperatureObservation } from "../types";
+import type {
+  Batch,
+  Container,
+  Handoff,
+  InventoryCheckItem,
+  InventoryCheckResult,
+  Location,
+  TemperatureObservation,
+} from "../types";
 
 let sequence = 0;
 
@@ -113,6 +121,48 @@ export function makeHandoff(container: Container, overrides: Partial<Handoff> = 
     exposure_exceeded: false,
     receipt_code: null,
     replayed: false,
+    ...overrides,
+  };
+}
+
+let checkSequence = 0;
+
+export function makeInventoryItem(
+  overrides: Partial<InventoryCheckItem> = {},
+): InventoryCheckItem {
+  checkSequence += 1;
+  return {
+    id: `check-item-${checkSequence}`,
+    category: "matched",
+    scanned_label: "TUBE-A",
+    line_number: 1,
+    container_id: "container-1",
+    batch_id: "batch-1",
+    accession_number: "BATCH-001",
+    container_label: "TUBE-A",
+    recorded_location_id: "loc-fridge",
+    recorded_location_code: "FRIDGE",
+    recorded_location_name: "冷藏冰箱",
+    ...overrides,
+  };
+}
+
+export function makeInventoryResult(
+  overrides: Partial<InventoryCheckResult> = {},
+): InventoryCheckResult {
+  return {
+    id: "check-1",
+    location_id: "loc-fridge",
+    checked_by: "night-a",
+    created_at: "2026-09-10T20:00:00Z",
+    matched_count: 1,
+    missing_count: 0,
+    misplaced_count: 0,
+    unknown_count: 0,
+    scanned_count: 1,
+    location: makeLocation(),
+    items: [makeInventoryItem()],
+    recent_checks: [],
     ...overrides,
   };
 }

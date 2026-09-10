@@ -1,4 +1,12 @@
-import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
+import type {
+  Batch,
+  Container,
+  Handoff,
+  InventoryCheckResult,
+  InventoryCheckSummary,
+  Location,
+  RejectReason,
+} from "./types";
 
 export interface TemperatureObservationInput {
   temperature_c: number;
@@ -38,6 +46,8 @@ export function errorMessage(error: unknown): string {
     BATCH_NOT_ACTIVE: "批次当前不可流转，暂不能转装替换。",
     INVALID_OBSERVED_AT: "测量时间无效：不能晚于当前时间，也不能早于批次创建时间。",
     TEMPERATURE_OUT_OF_RANGE: "测温结果超出批次温区，批次已进入复核。",
+    INVALID_INVENTORY_LABELS: "标签清单无效：不能包含空白或重复标签，请核对后重新扫描。",
+    LOCATION_NOT_COLD_STORAGE: "该位置不是冷藏位置，不能提交盘点。",
     DATABASE_UNAVAILABLE: "数据库暂时不可用，输入已保留，请稍后重试。",
     TRANSACTION_CONFLICT: "同时发生了另一项操作，请刷新后重试。",
   };
@@ -133,4 +143,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ actor, decision, note }),
     }),
+  submitInventoryCheck: (
+    locationId: string,
+    data: { checked_by: string; labels: string[] },
+  ) =>
+    request<InventoryCheckResult>(`/locations/${locationId}/inventory-checks`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  inventoryChecks: (locationId: string) =>
+    request<InventoryCheckSummary[]>(`/locations/${locationId}/inventory-checks`),
+  inventoryCheck: (checkId: string) =>
+    request<InventoryCheckResult>(`/inventory-checks/${checkId}`),
 };

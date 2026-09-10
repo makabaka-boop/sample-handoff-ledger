@@ -49,6 +49,13 @@ class TemperatureVerdict(str, enum.Enum):
     OUT_OF_RANGE = "out_of_range"
 
 
+class InventoryCheckCategory(str, enum.Enum):
+    MATCHED = "matched"
+    MISSING = "missing"
+    MISPLACED = "misplaced"
+    UNKNOWN = "unknown"
+
+
 class Location(Base):
     __tablename__ = "locations"
 
@@ -185,3 +192,64 @@ class TemperatureObservation(Base):
 
     batch: Mapped[Batch] = relationship(back_populates="temperature_observations")
     container: Mapped[Container] = relationship(foreign_keys=[container_id])
+
+
+class LocationInventoryCheck(Base):
+    """An immutable cold-location recount: scanned labels compared with the
+    server-side container snapshot taken in the same transaction. The check is
+    evidence only — it never moves containers or changes batch disposition."""
+
+    __tablename__ = "location_inventory_checks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    location_id: Mapped[str] = mapped_column(
+        ForeignKey("locations.id"), nullable=False, index=True
+    )
+    checked_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    matched_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    missing_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    misplaced_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    unknown_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    scanned_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    location: Mapped[Location] = relationship()
+    items: Mapped[list["LocationInventoryCheckItem"]] = relationship(
+        back_populates="check", cascade="all"
+    )
+
+
+class LocationInventoryCheckItem(Base):
+    """One immutable classified row of a recount. Snapshots are denormalised so
+    later moves, transloads or renames never rewrite the evidence."""
+
+    __tablename__ = "location_inventory_check_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    check_id: Mapped[str] = mapped_column(
+        ForeignKey("location_inventory_checks.id"), nullable=False, index=True
+    )
+    category: Mapped[InventoryCheckCategory] = mapped_column(
+        Enum(InventoryCheckCategory, native_enum=False), nullable=False
+    )
+    scanned_label: Mapped[str | None] = mapped_column(String(100))
+    line_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    container_id: Mapped[str | None] = mapped_column(String(36))
+    batch_id: Mapped[str | None] = mapped_column(String(36))
+    accession_number: Mapped[str | None] = mapped_column(String(80))
+    container_label: Mapped[str | None] = mapped_column(String(100))
+    recorded_location_id: Mapped[str | None] = mapped_column(String(36))
+    recorded_location_code: Mapped[str | None] = mapped_column(String(40))
+    recorded_location_name: Mapped[str | None] = mapped_column(String(100))
+
+    check: Mapped[LocationInventoryCheck] = relationship(back_populates="items")
+
+    __table_args__ = (
+        Index(
+            "uq_inventory_check_category_line",
+            "check_id",
+            "category",
+            "line_number",
+            unique=True,
+        ),
+    )

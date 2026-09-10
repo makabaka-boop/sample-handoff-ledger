@@ -1,10 +1,11 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "./api";
+import { InventoryPanel } from "./inventory";
 import { createServerCountdown, formatDuration } from "./time";
 import { TemperatureLog, TemperatureObservationForm } from "./temperature";
 import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
 
-type View = "tasks" | "receive" | "batches";
+type View = "tasks" | "receive" | "batches" | "inventory";
 type ReceiveMode = "confirm" | "reject";
 
 const rejectReasons: { value: RejectReason; label: string }[] = [
@@ -579,7 +580,7 @@ export default function App() {
     <div className="app-shell">
       <header>
         <div className="brand"><span className="brand-mark">S</span><div><strong>样本交接台</strong><small>NIGHT SHIFT LEDGER</small></div></div>
-        <nav>{(["tasks", "receive", "batches"] as View[]).map((item) => <button className={view === item ? "active" : ""} onClick={() => setView(item)} key={item}>{item === "tasks" ? "交接待办" : item === "receive" ? "短码接收" : "批次档案"}</button>)}</nav>
+        <nav>{(["tasks", "receive", "inventory", "batches"] as View[]).map((item) => <button className={view === item ? "active" : ""} onClick={() => setView(item)} key={item}>{item === "tasks" ? "交接待办" : item === "receive" ? "短码接收" : item === "inventory" ? "位置盘点" : "批次档案"}</button>)}</nav>
         <div className="connection"><i className={offline ? "off" : ""}></i>{offline ? "连接中断" : "系统在线"}</div>
       </header>
       {offline && <div className="offline-banner">无法连接服务器。页面不会预先改变任何状态；输入会保留，连接恢复后可重试。<button onClick={() => void refresh()}>立即重试</button></div>}
@@ -590,6 +591,7 @@ export default function App() {
           {!!handoffs.filter((item) => item.status === "received").length && <><h2 className="subheading">最近完成</h2><div className="task-grid compact-grid">{handoffs.filter((item) => item.status === "received").slice(0, 4).map((item) => <HandoffCard item={item} key={item.id} onOpen={() => void openHandoff(item)} />)}</div></>}
         </section>}
         {view === "receive" && <ReceivePanel onDone={() => void refresh()} />}
+        {view === "inventory" && <InventoryPanel locations={locations} />}
         {view === "batches" && <BatchPanel batches={batches} locations={locations} refresh={() => void refresh()} openBatch={(id) => void openBatch(id)} />}
       </main>
       <DetailDrawer handoff={selectedHandoff} batch={selectedBatch} close={() => { setSelectedHandoff(null); setSelectedBatch(null); setFreshCode(null); }} refresh={() => void refresh()} reloadBatch={setSelectedBatch} showCode={freshCode} />

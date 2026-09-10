@@ -60,3 +60,48 @@ button.compact, .secondary.compact { margin-top: 10px; padding: 8px 14px; font-s
 .temperature-log p { margin: 6px 0 0; color: #73817c; font-size: 12px; }
 .temperature-log small { color: #935d27; }
 .empty-log { color: #74817d; font-size: 13px; padding: 14px; border: 1px dashed #cbd4cf; background: #ffffff88; }
+
+/* Cold-location inventory recounts */
+.inventory-layout { display: grid; grid-template-columns: 0.85fr 1.15fr; background: #fff; box-shadow: 0 15px 50px #20352e12; min-height: 620px; }
+.inventory-copy { background: #173b32; color: #fff; padding: clamp(30px, 4vw, 56px); display: flex; flex-direction: column; }
+.inventory-copy h1 { font-size: 36px; margin: 14px 0 12px; letter-spacing: -.02em; }
+.inventory-copy > p { color: #b8ccc5; line-height: 1.8; font-size: 14px; }
+.inventory-work { padding: clamp(24px, 4vw, 46px); display: flex; flex-direction: column; gap: 22px; }
+.inventory-form { display: flex; flex-direction: column; }
+.inventory-form h2 { margin: 0 0 6px; font-size: 22px; }
+.inventory-form label { color: #52635d; font-size: 13px; margin: 14px 0 7px; }
+.inventory-form select, .inventory-form input, .inventory-form textarea { border: 1px solid #cad3ce; background: #fbfcfa; padding: 12px; outline: none; font: inherit; }
+.inventory-form select:focus, .inventory-form input:focus, .inventory-form textarea:focus { border-color: #347a65; box-shadow: 0 0 0 3px #347a6513; }
+.inventory-form textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.7; }
+.inventory-form .primary { margin-top: 18px; }
+.inventory-result { border-top: 2px solid #e3ebe6; padding-top: 18px; }
+.inventory-result-head h2 { margin: 6px 0 2px; font-size: 22px; }
+.inventory-result-head p { margin: 0 0 12px; color: #73817c; font-size: 12px; }
+.inventory-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 4px; }
+.inventory-count { display: grid; gap: 4px; padding: 10px 12px; font-size: 12px; border: 1px solid #dce2de; background: #fff; }
+.inventory-count strong { font-size: 20px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.inventory-count.matched { border-left: 4px solid #2b836a; }
+.inventory-count.missing { border-left: 4px solid #b1722f; }
+.inventory-count.misplaced { border-left: 4px solid #b9342b; }
+.inventory-count.unknown { border-left: 4px solid #676b69; }
+.inventory-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.inventory-group { border: 1px solid #dce2de; padding: 12px 14px; background: #fff; }
+.inventory-group h4 { margin: 0; display: flex; justify-content: space-between; font-size: 14px; }
+.inventory-group h4 span { font-family: ui-monospace, Menlo, monospace; color: #74817d; }
+.inventory-group.matched { border-left: 4px solid #2b836a; }
+.inventory-group.missing { border-left: 4px solid #b1722f; }
+.inventory-group.misplaced { border-left: 4px solid #b9342b; background: #fff7f6; }
+.inventory-group.unknown { border-left: 4px solid #676b69; }
+.inventory-group .group-hint { margin: 5px 0 8px; color: #8b9892; font-size: 11px; line-height: 1.5; }
+.inventory-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.inventory-group li { border-top: 1px solid #edf0ed; padding-top: 8px; display: grid; gap: 2px; }
+.inventory-group li strong { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.inventory-group li small { color: #73817c; font-size: 11px; }
+.inventory-group li .misplaced-location { color: #902b25; }
+.inventory-recent { margin-top: auto; padding-top: 20px; }
+.inventory-recent h3 { color: #dcebe4; font-size: 14px; }
+.inventory-recent ol { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+.inventory-recent li { border-left: 2px solid #357663; padding-left: 10px; display: grid; gap: 2px; }
+.inventory-recent span { font-size: 12px; color: #e8f1ed; font-family: ui-monospace, Menlo, monospace; }
+.inventory-recent small { color: #8fb0a5; font-size: 11px; }
+@media (max-width: 800px) { .inventory-layout { grid-template-columns: 1fr; } .inventory-counts, .inventory-groups { grid-template-columns: 1fr 1fr; } }

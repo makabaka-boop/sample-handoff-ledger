@@ -20,28 +20,26 @@ async function createTemperatureBatch(
   return response.json();
 }
 
-function localInputMinutesAgo(minutes: number): string {
-  const date = new Date(Date.now() - minutes * 60_000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  );
+async function waitPastNextWholeSecond(page: import("@playwright/test").Page, isoCreatedAt: string) {
+  // The measurement input carries whole-second precision while the server
+  // stamps batch creation with microseconds; opening the form inside the same
+  // second would default to a time before the batch existed. Wait for the next
+  // whole second so the "measure now" scenario is deterministic.
+  await page.waitForFunction((created) => {
+    const now = Date.now();
+    return new Date(created).getTime() < Math.floor(now / 1000) * 1000;
+  }, isoCreatedAt);
 }
 
 async function submitReading(
   page: import("@playwright/test").Page,
   value: string,
-  minutesAgo?: number,
 ) {
   await page.getByRole("button", { name: "补录人工测温" }).first().click();
   await page.getByLabel("摄氏温度 (°C)").fill(value);
   await page.getByLabel("测量人").fill("night-a");
-  // When no time is supplied, leave the form default: an immediate measurement
-  // must validate even when the batch was created seconds ago.
-  if (minutesAgo !== undefined) {
-    await page.getByLabel("测量时间").fill(localInputMinutesAgo(minutesAgo));
-  }
+  // Leave the form default measurement time ("now"), which the caller made
+  // strictly later than batch creation via waitPastNextWholeSecond.
   await page.getByLabel("备注").fill("夜班交接窗复测");
   await page.getByRole("button", { name: "提交测温判定" }).click();
 }
@@ -52,13 +50,14 @@ test("an in-range reading is normal, keeps the batch active and writes one timel
 }) => {
   const suffix = Date.now().toString();
   const batch = await createTemperatureBatch(request, suffix);
+  await waitPastNextWholeSecond(page, batch.created_at);
 
   await page.goto("/");
   await page.getByRole("button", { name: "批次档案" }).click();
   await page.getByRole("button", { name: `TEMP-${suffix}` }).click();
 
-  // Rely on the form's default "now" — the batch was created through the API
-  // seconds ago, and an immediate measurement must not be rejected as early.
+  // Rely on the form's default "now" — an immediate measurement must not be
+  // rejected as earlier than the batch created through the API.
   await submitReading(page, "5.0");
   await expect(page.getByText("人工测温已按批次温区判定")).toBeVisible();
 
@@ -88,12 +87,13 @@ test("an out-of-range reading enters review and still produces exactly one event
 }) => {
   const suffix = (Date.now() + 1).toString();
   const batch = await createTemperatureBatch(request, suffix);
+  await waitPastNextWholeSecond(page, batch.created_at);
 
   await page.goto("/");
   await page.getByRole("button", { name: "批次档案" }).click();
   await page.getByRole("button", { name: `TEMP-${suffix}` }).click();
 
-  await submitReading(page, "9.5", 5);
+  await submitReading(page, "9.5");
   await expect(page.getByText("人工测温已按批次温区判定")).toBeVisible();
 
   const detailResponse = await request.get(`${API_URL}/batches/${batch.id}`);

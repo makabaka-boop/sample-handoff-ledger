@@ -6,6 +6,40 @@ export interface Location {
   name: string;
   is_cold_storage: boolean;
 }
+
+export type InventoryCheckCategory = "matched" | "missing" | "misplaced" | "unknown";
+
+export interface InventoryCheckItem {
+  id: string;
+  category: InventoryCheckCategory;
+  scanned_label: string | null;
+  line_number: number;
+  container_id: string | null;
+  batch_id: string | null;
+  accession_number: string | null;
+  container_label: string | null;
+  recorded_location_id: string | null;
+  recorded_location_code: string | null;
+  recorded_location_name: string | null;
+}
+
+export interface InventoryCheckSummary {
+  id: string;
+  location_id: string;
+  checked_by: string;
+  created_at: string;
+  matched_count: number;
+  missing_count: number;
+  misplaced_count: number;
+  unknown_count: number;
+  scanned_count: number;
+  location: Location;
+}
+
+export interface InventoryCheckResult extends InventoryCheckSummary {
+  items: InventoryCheckItem[];
+  recent_checks: InventoryCheckSummary[];
+}
 export type ContainerStatus = "active" | "replaced";
 
 export interface Container {
