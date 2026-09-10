@@ -203,3 +203,48 @@ test("a fully matching recount reports four zero differences", async ({ page, re
   expect(detail.containers[0].current_location.code).toBe(location.code);
   expect(detail.disposition).toBe("active");
 });
+
+test("a blank line inside the scan is rejected and creates no inventory record", async ({
+  page,
+  request,
+}) => {
+  const suffix = (Date.now() + 2).toString();
+  const location = await createColdLocation(request, suffix);
+  await createBatch(request, `INV-E2E-D-${suffix}`, ["INV-D1"], location.code);
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "位置盘点" }).click();
+  await page.getByLabel("冷藏位置").selectOption({ label: `${location.name}（${location.code}）` });
+  await page.getByLabel("盘点人").fill("night-c");
+  // A scanner gap between two reads must be reported as an invalid label, not
+  // silently dropped and submitted.
+  await page
+    .getByLabel("容器标签（每行一个，按扫描顺序）")
+    .fill("INV-D1\n   \nINV-D1");
+  await page.getByRole("button", { name: "提交盘点" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("标签清单无效");
+  await expect(page.getByRole("alert")).toContainText("第 2 行");
+  // The raw scan stays in the form so the operator can remove the gap.
+  await expect(page.getByLabel("容器标签（每行一个，按扫描顺序）")).toHaveValue(
+    "INV-D1\n   \nINV-D1",
+  );
+  await expect(page.getByRole("heading", { name: "本次盘点结果" })).toHaveCount(0);
+
+  // Nothing reached the server: no record exists for this location.
+  const checksResponse = await request.get(
+    `${API_URL}/locations/${location.id}/inventory-checks`,
+  );
+  expect(await checksResponse.json()).toHaveLength(0);
+
+  // A trailing newline from the scanner's carriage return still submits.
+  await page
+    .getByLabel("容器标签（每行一个，按扫描顺序）")
+    .fill("INV-D1\n");
+  await page.getByRole("button", { name: "提交盘点" }).click();
+  await expect(page.getByTestId("count-matched")).toHaveText("1");
+  const checks = await (
+    await request.get(`${API_URL}/locations/${location.id}/inventory-checks`)
+  ).json();
+  expect(checks).toHaveLength(1);
+});

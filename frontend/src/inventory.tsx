@@ -8,13 +8,32 @@ import type {
 } from "./types";
 
 // The scanner accumulates one label per line; surrounding whitespace is
-// stripped and blank lines ignored so an accidental trailing newline never
-// blocks submission.
+// stripped per line. Blank lines are NOT filtered away here — blankLabelLines
+// validates the raw scan so a gap is rejected instead of silently submitted.
 export function parseScannedLabels(text: string): string[] {
   return text
     .split("\n")
     .map((label) => label.trim())
     .filter((label) => label.length > 0);
+}
+
+// Returns the 1-based positions of blank lines in the raw scan. The scanner's
+// final carriage return only produces trailing blank lines, which are ignored;
+// a blank line between or before labels means a missing/unreadable scan and
+// must be rejected before submission.
+export function blankLabelLines(text: string): number[] {
+  const rawLines = text.split("\n");
+  // The scanner's final carriage return only leaves trailing blank lines, so
+  // ignore those; an internal or leading blank line is an unreadable/missing
+  // scan and must be rejected.
+  let end = rawLines.length;
+  while (end > 0 && rawLines[end - 1].trim().length === 0) end -= 1;
+  const lines = rawLines.slice(0, end);
+  if (!lines.length) return [];
+  return lines
+    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    .filter((entry) => entry.line.length === 0)
+    .map((entry) => entry.number);
 }
 
 export function duplicateLabels(labels: string[]): string[] {
@@ -179,9 +198,19 @@ export function InventoryPanel({ locations }: { locations: Location[] }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const blankLines = blankLabelLines(labelText);
     const labels = parseScannedLabels(labelText);
     if (!labels.length) {
       setError("请先扫描至少一个容器标签。");
+      return;
+    }
+    // A blank line in the middle (or at the start) is an unreadable/missing
+    // scan: reject before any request so the server never receives a silently
+    // shortened label list and creates a record.
+    if (blankLines.length) {
+      setError(
+        `标签清单无效：第 ${blankLines.join("、")} 行为空白标签，请补扫或删除该行后再提交。`,
+      );
       return;
     }
     const duplicated = duplicateLabels(labels);
