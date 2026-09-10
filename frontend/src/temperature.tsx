@@ -9,21 +9,25 @@ export function localInputToUtcIso(value: string): string {
 }
 
 export function utcIsoToLocalInput(iso: string): string {
-  const date = new Date(iso);
+  return dateToLocalInput(new Date(iso));
+}
+
+function dateToLocalInput(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   );
 }
 
-export function defaultObservedAt(): string {
-  const date = new Date(Date.now() - 60_000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
-  );
+// The reading is taken "now", but a batch created seconds ago would reject a
+// default rounded before its creation. Clamp to the later of the two instants
+// so an immediate measurement after registration always validates.
+export function defaultObservedAt(batchCreatedAt?: string): string {
+  const now = new Date();
+  const created = batchCreatedAt ? new Date(batchCreatedAt) : null;
+  const chosen = created && created > now ? created : now;
+  return dateToLocalInput(chosen);
 }
 
 const verdictLabel = {
@@ -43,10 +47,18 @@ export function TemperatureObservationForm({
   const [open, setOpen] = useState(false);
   const [temperature, setTemperature] = useState("");
   const [measuredBy, setMeasuredBy] = useState("");
-  const [observedAt, setObservedAt] = useState(defaultObservedAt());
+  const [observedAt, setObservedAt] = useState(() => defaultObservedAt(batch.created_at));
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  function openForm() {
+    // Recompute when opened so an immediate measurement defaults to "now",
+    // never to a minute-rounded instant before the batch existed.
+    setObservedAt(defaultObservedAt(batch.created_at));
+    setError("");
+    setOpen(true);
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -63,6 +75,7 @@ export function TemperatureObservationForm({
       setTemperature("");
       setMeasuredBy("");
       setNote("");
+      setObservedAt(defaultObservedAt(batch.created_at));
       onRecorded(detail);
     } catch (err) {
       // The transaction rolled back; keep every field so the operator can fix
@@ -75,7 +88,7 @@ export function TemperatureObservationForm({
 
   if (!open) {
     return (
-      <button className="secondary compact" type="button" onClick={() => setOpen(true)}>
+      <button className="secondary compact" type="button" onClick={openForm}>
         补录人工测温
       </button>
     );
@@ -121,6 +134,7 @@ export function TemperatureObservationForm({
           value={observedAt}
           onChange={(event) => setObservedAt(event.target.value)}
           type="datetime-local"
+          step="1"
           required
         />
       </label>

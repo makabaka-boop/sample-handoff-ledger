@@ -4,6 +4,7 @@ import { api, ApiError } from "./api";
 import {
   TemperatureLog,
   TemperatureObservationForm,
+  defaultObservedAt,
   localInputToUtcIso,
   utcIsoToLocalInput,
 } from "./temperature";
@@ -112,6 +113,33 @@ describe("temperature observation form", () => {
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(spy.mock.calls[0][1].note).toBeNull();
   });
+
+  it("defaults the measurement time to now so submitting right after batch creation works", async () => {
+    const container = makeContainer();
+    // Batch created moments ago: the prior minute-rounded default predated it.
+    const batch = makeBatch({
+      containers: [container],
+      created_at: new Date(Date.now() - 2000).toISOString(),
+    });
+    const spy = vi.spyOn(api, "recordTemperature").mockResolvedValue(batch);
+    render(
+      <TemperatureObservationForm
+        container={container}
+        batch={batch}
+        onRecorded={() => {}}
+      />,
+    );
+    openForm();
+    fireEvent.change(screen.getByLabelText("摄氏温度 (°C)"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("测量人"), { target: { value: "night-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交测温判定" }));
+
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    const observedAt = new Date(spy.mock.calls[0][1].observed_at).getTime();
+    expect(observedAt).toBeGreaterThanOrEqual(new Date(batch.created_at).getTime());
+    expect(observedAt).toBeLessThanOrEqual(Date.now() + 1000);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("temperature log", () => {
@@ -161,5 +189,25 @@ describe("datetime local helpers", () => {
     const iso = "2026-09-10T09:30:00Z";
     const local = utcIsoToLocalInput(iso);
     expect(new Date(localInputToUtcIso(local)).getTime()).toBe(new Date(iso).getTime());
+  });
+
+  it("defaults to the current instant with second precision", () => {
+    const before = new Date();
+    const value = defaultObservedAt();
+    const after = new Date();
+    expect(value).toMatch(/T\d{2}:\d{2}:\d{2}$/);
+    const parsed = new Date(localInputToUtcIso(value));
+    expect(parsed.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
+    expect(parsed.getTime()).toBeLessThanOrEqual(after.getTime() + 1000);
+  });
+
+  it("clamps the default to batch creation so an immediate reading validates", () => {
+    // Simulate a batch created slightly in the future (clock skew / same-minute
+    // rounding): the default must never be earlier than the batch itself.
+    const futureBatch = new Date(Date.now() + 30_000).toISOString();
+    const value = defaultObservedAt(futureBatch);
+    expect(new Date(localInputToUtcIso(value)).getTime()).toBeGreaterThanOrEqual(
+      new Date(futureBatch).getTime() - 1000,
+    );
   });
 });
