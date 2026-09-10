@@ -204,7 +204,7 @@ test("a fully matching recount reports four zero differences", async ({ page, re
   expect(detail.disposition).toBe("active");
 });
 
-test("a blank line inside the scan is rejected and creates no inventory record", async ({
+test("blank lines inside or at the end of the scan are rejected with no record", async ({
   page,
   request,
 }) => {
@@ -216,20 +216,29 @@ test("a blank line inside the scan is rejected and creates no inventory record",
   await page.getByRole("button", { name: "位置盘点" }).click();
   await page.getByLabel("冷藏位置").selectOption({ label: `${location.name}（${location.code}）` });
   await page.getByLabel("盘点人").fill("night-c");
-  // A scanner gap between two reads must be reported as an invalid label, not
-  // silently dropped and submitted.
-  await page
-    .getByLabel("容器标签（每行一个，按扫描顺序）")
-    .fill("INV-D1\n   \nINV-D1");
-  await page.getByRole("button", { name: "提交盘点" }).click();
 
-  await expect(page.getByRole("alert")).toContainText("标签清单无效");
-  await expect(page.getByRole("alert")).toContainText("第 2 行");
-  // The raw scan stays in the form so the operator can remove the gap.
-  await expect(page.getByLabel("容器标签（每行一个，按扫描顺序）")).toHaveValue(
-    "INV-D1\n   \nINV-D1",
-  );
-  await expect(page.getByRole("heading", { name: "本次盘点结果" })).toHaveCount(0);
+  async function assertRejected(rawScan: string, lineNumbers: string) {
+    await page
+      .getByLabel("容器标签（每行一个，按扫描顺序）")
+      .fill(rawScan);
+    await page.getByRole("button", { name: "提交盘点" }).click();
+    await expect(page.getByRole("alert")).toContainText("标签清单无效");
+    await expect(page.getByRole("alert")).toContainText(lineNumbers);
+    // The raw scan stays in the form so the operator can remove the blank line.
+    await expect(page.getByLabel("容器标签（每行一个，按扫描顺序）")).toHaveValue(
+      rawScan,
+    );
+    await expect(page.getByRole("heading", { name: "本次盘点结果" })).toHaveCount(0);
+  }
+
+  // A scanner gap between two reads must be reported as an invalid label, not
+  // silently dropped and submitted (the duplicate label is irrelevant while
+  // the blank-line error blocks the request first).
+  await assertRejected("INV-D1\n   \nINV-D1", "第 2 行");
+
+  // A stray carriage return after the final label leaves a trailing blank
+  // line: this is invalid as well, never auto-submitted.
+  await assertRejected("INV-D1\n", "第 2 行");
 
   // Nothing reached the server: no record exists for this location.
   const checksResponse = await request.get(
@@ -237,10 +246,10 @@ test("a blank line inside the scan is rejected and creates no inventory record",
   );
   expect(await checksResponse.json()).toHaveLength(0);
 
-  // A trailing newline from the scanner's carriage return still submits.
+  // Once every line contains a label, the recount submits normally.
   await page
     .getByLabel("容器标签（每行一个，按扫描顺序）")
-    .fill("INV-D1\n");
+    .fill("INV-D1");
   await page.getByRole("button", { name: "提交盘点" }).click();
   await expect(page.getByTestId("count-matched")).toHaveText("1");
   const checks = await (

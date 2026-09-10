@@ -17,20 +17,13 @@ export function parseScannedLabels(text: string): string[] {
     .filter((label) => label.length > 0);
 }
 
-// Returns the 1-based positions of blank lines in the raw scan. The scanner's
-// final carriage return only produces trailing blank lines, which are ignored;
-// a blank line between or before labels means a missing/unreadable scan and
-// must be rejected before submission.
+// Returns the 1-based positions of every blank line in the raw scan,
+// including trailing ones: each scanned label occupies exactly one line, so a
+// blank line anywhere (a stray scanner carriage return at the end included)
+// means an unreadable/missing scan and must be rejected before submission.
 export function blankLabelLines(text: string): number[] {
-  const rawLines = text.split("\n");
-  // The scanner's final carriage return only leaves trailing blank lines, so
-  // ignore those; an internal or leading blank line is an unreadable/missing
-  // scan and must be rejected.
-  let end = rawLines.length;
-  while (end > 0 && rawLines[end - 1].trim().length === 0) end -= 1;
-  const lines = rawLines.slice(0, end);
-  if (!lines.length) return [];
-  return lines
+  return text
+    .split("\n")
     .map((line, index) => ({ line: line.trim(), number: index + 1 }))
     .filter((entry) => entry.line.length === 0)
     .map((entry) => entry.number);

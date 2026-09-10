@@ -34,17 +34,16 @@ describe("label parsing helpers", () => {
     expect(parseScannedLabels(" TUBE-A \nTUBE-B")).toEqual(["TUBE-A", "TUBE-B"]);
   });
 
-  it("detects blank lines but tolerates the scanner's trailing carriage return", () => {
-    expect(blankLabelLines("TUBE-A\nTUBE-B\n")).toEqual([]);
+  it("reports every blank line, including trailing lines left by the scanner", () => {
+    expect(blankLabelLines("TUBE-A\nTUBE-B")).toEqual([]);
+    expect(blankLabelLines("TUBE-A\nTUBE-B\n")).toEqual([3]);
     expect(blankLabelLines("TUBE-A\n\nTUBE-B")).toEqual([2]);
     expect(blankLabelLines("\nTUBE-A")).toEqual([1]);
-    expect(blankLabelLines("TUBE-A\n   \nTUBE-B\n")).toEqual([2]);
-    expect(blankLabelLines("TUBE-A\nTUBE-B\n\n")).toEqual([]);
+    expect(blankLabelLines("TUBE-A\n   \nTUBE-B\n")).toEqual([2, 4]);
+    expect(blankLabelLines("TUBE-A\nTUBE-B\n\n")).toEqual([3, 4]);
     expect(blankLabelLines("\n  \nX")).toEqual([1, 2]);
-    // An entirely blank scan is reported as "scan at least one label", not as
-    // individual blank-line positions.
-    expect(blankLabelLines("\n  \n")).toEqual([]);
-    expect(blankLabelLines("X\n  \r\n")).toEqual([]);
+    expect(blankLabelLines("\n  \n")).toEqual([1, 2, 3]);
+    expect(blankLabelLines("X\n  \r\n")).toEqual([2, 3]);
     expect(blankLabelLines("X\r\n\r\nY")).toEqual([2]);
   });
 
@@ -106,7 +105,7 @@ describe("inventory panel", () => {
     render(<InventoryPanel locations={[fridge, bench]} />);
 
     fireEvent.change(checker(), { target: { value: "night-a" } });
-    fireEvent.change(labels(), { target: { value: " A1 \nB1\nGHOST\n" } });
+    fireEvent.change(labels(), { target: { value: " A1 \nB1\nGHOST" } });
     fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
@@ -193,17 +192,32 @@ describe("inventory panel", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("still submits when the scanner appends a trailing newline", async () => {
-    const result = makeInventoryResult();
-    const spy = vi.spyOn(api, "submitInventoryCheck").mockResolvedValue(result);
+  it("rejects a trailing blank line before any request and keeps the raw scan", async () => {
+    const spy = vi.spyOn(api, "submitInventoryCheck");
     render(<InventoryPanel locations={[fridge]} />);
 
     fireEvent.change(checker(), { target: { value: "night-a" } });
     fireEvent.change(labels(), { target: { value: "TUBE-A\n" } });
     fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
 
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("标签清单无效"));
+    expect(screen.getByRole("alert")).toHaveTextContent("第 2 行");
+    expect(labels()).toHaveValue("TUBE-A\n");
+    expect(checker()).toHaveValue("night-a");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("submits when every scan line contains a label", async () => {
+    const result = makeInventoryResult();
+    const spy = vi.spyOn(api, "submitInventoryCheck").mockResolvedValue(result);
+    render(<InventoryPanel locations={[fridge]} />);
+
+    fireEvent.change(checker(), { target: { value: "night-a" } });
+    fireEvent.change(labels(), { target: { value: "TUBE-A\nTUBE-B" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
+
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
-    expect(spy.mock.calls[0][1].labels).toEqual(["TUBE-A"]);
+    expect(spy.mock.calls[0][1].labels).toEqual(["TUBE-A", "TUBE-B"]);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
