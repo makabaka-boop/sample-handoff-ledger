@@ -30,12 +30,31 @@ export interface Batch {
   id: string;
   accession_number: string;
   temperature_zone: string;
+  temp_min_c: number;
+  temp_max_c: number;
   max_out_minutes: number;
   disposition: "active" | "isolated" | "review" | "released";
   created_at: string;
   has_unresolved_anomaly: boolean;
   containers: Container[];
   timeline?: TimelineEvent[];
+  temperature_observations?: TemperatureObservation[];
+}
+
+export type TemperatureVerdict = "normal" | "out_of_range";
+
+export interface TemperatureObservation {
+  id: string;
+  batch_id: string;
+  container_id: string;
+  temperature_c: number;
+  verdict: TemperatureVerdict;
+  measured_by: string;
+  observed_at: string;
+  note: string | null;
+  created_at: string;
+  temp_min_c: number;
+  temp_max_c: number;
 }
 
 export interface TimelineEvent {

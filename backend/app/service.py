@@ -17,6 +17,8 @@ from .models import (
     Handoff,
     HandoffStatus,
     Location,
+    TemperatureObservation,
+    TemperatureVerdict,
     TimelineEvent,
 )
 from .schemas import (
@@ -34,9 +36,12 @@ from .schemas import (
     RejectRequest,
     ReopenRequest,
     ResolveAnomalyRequest,
+    TemperatureObservationRead,
+    TemperatureObservationRequest,
     TimelineRead,
 )
 from .security import code_digest, generate_code
+from .temperature import classify_temperature
 
 _sqlite_code_action_locks: dict[str, threading.Lock] = {}
 _sqlite_locks_guard = threading.Lock()
@@ -59,6 +64,7 @@ def _event(
     at: datetime,
     container_id: str | None = None,
     handoff_id: str | None = None,
+    observation_id: str | None = None,
     details: dict | None = None,
     note: str | None = None,
 ) -> None:
@@ -67,6 +73,7 @@ def _event(
             batch_id=batch_id,
             container_id=container_id,
             handoff_id=handoff_id,
+            observation_id=observation_id,
             event_type=event_type,
             actor=actor,
             occurred_at=at,
@@ -225,6 +232,8 @@ def create_batch(db: Session, payload: BatchCreate, clock: Clock) -> BatchSummar
         batch = Batch(
             accession_number=payload.accession_number,
             temperature_zone=payload.temperature_zone,
+            temp_min_c=payload.temp_min_c,
+            temp_max_c=payload.temp_max_c,
             max_out_minutes=payload.max_out_minutes,
             created_at=now,
         )
@@ -279,6 +288,8 @@ def list_batches(db: Session, clock: Clock) -> list[BatchSummary]:
             id=batch.id,
             accession_number=batch.accession_number,
             temperature_zone=batch.temperature_zone,
+            temp_min_c=batch.temp_min_c,
+            temp_max_c=batch.temp_max_c,
             max_out_minutes=batch.max_out_minutes,
             disposition=batch.disposition,
             created_at=batch.created_at,
@@ -304,6 +315,8 @@ def get_batch(
         id=batch.id,
         accession_number=batch.accession_number,
         temperature_zone=batch.temperature_zone,
+        temp_min_c=batch.temp_min_c,
+        temp_max_c=batch.temp_max_c,
         max_out_minutes=batch.max_out_minutes,
         disposition=batch.disposition,
         created_at=batch.created_at,
@@ -317,6 +330,16 @@ def get_batch(
             select(TimelineEvent)
             .where(TimelineEvent.batch_id == batch_id)
             .order_by(TimelineEvent.occurred_at.desc(), TimelineEvent.id.desc())
+        )
+    )
+    observations = list(
+        db.scalars(
+            select(TemperatureObservation)
+            .where(TemperatureObservation.batch_id == batch_id)
+            .order_by(
+                TemperatureObservation.observed_at.desc(),
+                TemperatureObservation.id.desc(),
+            )
         )
     )
     return BatchDetail(
@@ -333,6 +356,22 @@ def get_batch(
                 note=event.note,
             )
             for event in events
+        ],
+        temperature_observations=[
+            TemperatureObservationRead(
+                id=observation.id,
+                batch_id=observation.batch_id,
+                container_id=observation.container_id,
+                temperature_c=observation.temperature_c,
+                verdict=observation.verdict.value,
+                measured_by=observation.measured_by,
+                observed_at=observation.observed_at,
+                note=observation.note,
+                created_at=observation.created_at,
+                temp_min_c=batch.temp_min_c,
+                temp_max_c=batch.temp_max_c,
+            )
+            for observation in observations
         ],
     )
 
@@ -440,6 +479,104 @@ def replace_container(
                     "out_since": successor.out_since.isoformat()
                     if successor.out_since
                     else None,
+                },
+                note=payload.note,
+            )
+            batch_id = batch.id
+    finally:
+        if local_lock:
+            local_lock.release()
+    return get_batch(db, batch_id, clock)
+
+
+def record_temperature_observation(
+    db: Session,
+    container_id: str,
+    payload: TemperatureObservationRequest,
+    clock: Clock,
+) -> BatchDetail:
+    """Adjudicate one manual celsius reading against the batch bounds.
+
+    The observation and its single timeline event commit atomically. An out of
+    range reading also sends the batch to review, but never touches the
+    container's position, out-of-storage timer or any handoff.
+    """
+    local_lock = _container_action_lock(db, container_id)
+    if local_lock:
+        local_lock.acquire()
+    batch_id = ""
+    try:
+        now = clock.now()
+        with db.begin():
+            # Same adjudication order as the other container actions.
+            container = db.scalar(
+                select(Container).where(Container.id == container_id).with_for_update()
+            )
+            if container is None:
+                raise DomainError(404, "CONTAINER_NOT_FOUND", "Container does not exist.")
+            if container.status == ContainerStatus.REPLACED:
+                raise DomainError(
+                    409,
+                    "CONTAINER_ALREADY_REPLACED",
+                    "This container was sealed after transloading; "
+                    "measure the replacement container.",
+                    details={"replacement_container_id": container.replacement_container_id},
+                )
+            batch = db.scalar(select(Batch).where(Batch.id == container.batch_id).with_for_update())
+            assert batch is not None
+            observed_at = _aware(payload.observed_at)
+            if observed_at > now:
+                raise DomainError(
+                    422,
+                    "INVALID_OBSERVED_AT",
+                    "Measurement time cannot be later than the server's current time.",
+                    details={
+                        "observed_at": observed_at.isoformat(),
+                        "server_time": now.isoformat(),
+                    },
+                )
+            if observed_at < _aware(batch.created_at):
+                raise DomainError(
+                    422,
+                    "INVALID_OBSERVED_AT",
+                    "Measurement time cannot be earlier than the batch creation time.",
+                    details={
+                        "observed_at": observed_at.isoformat(),
+                        "batch_created_at": _aware(batch.created_at).isoformat(),
+                    },
+                )
+            verdict_value = classify_temperature(
+                payload.temperature_c, batch.temp_min_c, batch.temp_max_c
+            )
+            verdict = TemperatureVerdict(verdict_value)
+            observation = TemperatureObservation(
+                batch_id=batch.id,
+                container_id=container.id,
+                temperature_c=payload.temperature_c,
+                verdict=verdict,
+                measured_by=payload.measured_by,
+                observed_at=observed_at,
+                note=payload.note,
+                created_at=now,
+            )
+            db.add(observation)
+            db.flush()
+            if verdict == TemperatureVerdict.OUT_OF_RANGE:
+                batch.disposition = BatchDisposition.REVIEW
+            _event(
+                db,
+                batch_id=batch.id,
+                container_id=container.id,
+                observation_id=observation.id,
+                event_type="temperature_recorded",
+                actor=payload.measured_by,
+                at=observed_at,
+                details={
+                    "observation_id": observation.id,
+                    "temperature_c": payload.temperature_c,
+                    "verdict": verdict_value,
+                    "temp_min_c": batch.temp_min_c,
+                    "temp_max_c": batch.temp_max_c,
                 },
                 note=payload.note,
             )

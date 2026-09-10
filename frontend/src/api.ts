@@ -1,5 +1,12 @@
 import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
 
+export interface TemperatureObservationInput {
+  temperature_c: number;
+  measured_by: string;
+  observed_at: string;
+  note: string | null;
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? "/api";
 
 export class ApiError extends Error {
@@ -29,6 +36,8 @@ export function errorMessage(error: unknown): string {
     HANDOFF_ALREADY_PENDING: "该容器存在待接收交接，请先完成或撤销后再转装。",
     CONTAINER_LABEL_EXISTS: "批次内已存在相同的容器标签，请换一个新标签。",
     BATCH_NOT_ACTIVE: "批次当前不可流转，暂不能转装替换。",
+    INVALID_OBSERVED_AT: "测量时间无效：不能晚于当前时间，也不能早于批次创建时间。",
+    TEMPERATURE_OUT_OF_RANGE: "测温结果超出批次温区，批次已进入复核。",
     DATABASE_UNAVAILABLE: "数据库暂时不可用，输入已保留，请稍后重试。",
     TRANSACTION_CONFLICT: "同时发生了另一项操作，请刷新后重试。",
   };
@@ -72,6 +81,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  recordTemperature: (id: string, data: TemperatureObservationInput) =>
+    request<Batch>(`/containers/${id}/temperature-observations`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   handoffs: () => request<Handoff[]>("/handoffs"),
   handoff: (id: string) => request<Handoff>(`/handoffs/${id}`),
   confirm: (code: string, receivedBy: string) =>
@@ -91,7 +105,8 @@ export const api = {
     }),
   createBatch: (data: {
     accession_number: string;
-    temperature_zone: string;
+    temp_min_c: number;
+    temp_max_c: number;
     max_out_minutes: number;
     created_by: string;
     containers: { label: string; initial_location_code: string }[];

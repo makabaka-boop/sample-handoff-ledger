@@ -4,6 +4,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .models import BatchDisposition, ContainerStatus, HandoffStatus
+from .temperature import (
+    MAX_PLAUSIBLE_C,
+    MIN_PLAUSIBLE_C,
+    format_temperature_zone,
+    parse_temperature_zone,
+)
 
 
 class LocationCreate(BaseModel):
@@ -25,7 +31,9 @@ class ContainerCreate(BaseModel):
 
 class BatchCreate(BaseModel):
     accession_number: str = Field(min_length=1, max_length=80)
-    temperature_zone: str = Field(min_length=1, max_length=40)
+    temperature_zone: str | None = Field(default=None, min_length=1, max_length=40)
+    temp_min_c: float | None = Field(default=None, ge=MIN_PLAUSIBLE_C, le=MAX_PLAUSIBLE_C)
+    temp_max_c: float | None = Field(default=None, ge=MIN_PLAUSIBLE_C, le=MAX_PLAUSIBLE_C)
     max_out_minutes: int = Field(ge=1, le=10080)
     created_by: str = Field(min_length=1, max_length=100)
     containers: list[ContainerCreate] = Field(min_length=1, max_length=100)
@@ -37,6 +45,29 @@ class BatchCreate(BaseModel):
         if len(labels) != len(set(labels)):
             raise ValueError("container labels must be unique within a batch")
         return containers
+
+    @model_validator(mode="after")
+    def resolve_temperature_bounds(self) -> "BatchCreate":
+        if self.temp_min_c is not None and self.temp_max_c is not None:
+            if self.temp_min_c > self.temp_max_c:
+                raise ValueError("temp_min_c must not be above temp_max_c")
+            if self.temperature_zone is None:
+                self.temperature_zone = format_temperature_zone(
+                    self.temp_min_c, self.temp_max_c
+                )
+            return self
+        # Legacy clients only sent free text; parse it so every batch gets bounds.
+        if self.temperature_zone:
+            try:
+                low, high = parse_temperature_zone(self.temperature_zone)
+            except ValueError as exc:
+                raise ValueError(
+                    "temperature_zone must be a celsius range like '2–8°C' "
+                    "or supply temp_min_c/temp_max_c"
+                ) from exc
+            self.temp_min_c, self.temp_max_c = low, high
+            return self
+        raise ValueError("supply temp_min_c and temp_max_c (or a parseable temperature_zone)")
 
 
 class ContainerRead(BaseModel):
@@ -71,10 +102,42 @@ class ContainerReplaceRequest(BaseModel):
         return value
 
 
+class TemperatureObservationRequest(BaseModel):
+    temperature_c: float = Field(ge=MIN_PLAUSIBLE_C, le=MAX_PLAUSIBLE_C)
+    measured_by: str = Field(min_length=1, max_length=100)
+    observed_at: datetime
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("note")
+    @classmethod
+    def blank_note_to_none(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            return None
+        return value
+
+
+class TemperatureObservationRead(BaseModel):
+    id: str
+    batch_id: str
+    container_id: str
+    temperature_c: float
+    verdict: Literal["normal", "out_of_range"]
+    measured_by: str
+    observed_at: datetime
+    note: str | None
+    created_at: datetime
+    temp_min_c: float
+    temp_max_c: float
+
+    model_config = {"from_attributes": True}
+
+
 class BatchSummary(BaseModel):
     id: str
     accession_number: str
     temperature_zone: str
+    temp_min_c: float
+    temp_max_c: float
     max_out_minutes: int
     disposition: BatchDisposition
     created_at: datetime
@@ -95,6 +158,7 @@ class TimelineRead(BaseModel):
 
 class BatchDetail(BatchSummary):
     timeline: list[TimelineRead]
+    temperature_observations: list[TemperatureObservationRead]
 
 
 class HandoffCreate(BaseModel):

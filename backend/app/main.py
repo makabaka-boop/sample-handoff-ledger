@@ -25,6 +25,7 @@ from .schemas import (
     RejectRequest,
     ReopenRequest,
     ResolveAnomalyRequest,
+    TemperatureObservationRequest,
 )
 from .service import (
     cancel_handoff,
@@ -38,6 +39,7 @@ from .service import (
     list_handoffs,
     list_locations,
     mark_anomaly,
+    record_temperature_observation,
     reject_handoff,
     reopen_handoff,
     replace_container,
@@ -97,6 +99,17 @@ def batch_detail(batch_id: str, db: Session = Depends(get_db)):
 @app.post("/api/containers/{container_id}/replace", response_model=BatchDetail)
 def replace(container_id: str, payload: ContainerReplaceRequest, db: Session = Depends(get_db)):
     return replace_container(db, container_id, payload, clock)
+
+
+@app.post(
+    "/api/containers/{container_id}/temperature-observations",
+    response_model=BatchDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_temperature_observation(
+    container_id: str, payload: TemperatureObservationRequest, db: Session = Depends(get_db)
+):
+    return record_temperature_observation(db, container_id, payload, clock)
 
 
 @app.post("/api/handoffs", response_model=HandoffRead, status_code=status.HTTP_201_CREATED)

@@ -3,7 +3,19 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -32,6 +44,11 @@ class ContainerStatus(str, enum.Enum):
     REPLACED = "replaced"
 
 
+class TemperatureVerdict(str, enum.Enum):
+    NORMAL = "normal"
+    OUT_OF_RANGE = "out_of_range"
+
+
 class Location(Base):
     __tablename__ = "locations"
 
@@ -47,6 +64,8 @@ class Batch(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     accession_number: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     temperature_zone: Mapped[str] = mapped_column(String(40), nullable=False)
+    temp_min_c: Mapped[float] = mapped_column(Float, nullable=False)
+    temp_max_c: Mapped[float] = mapped_column(Float, nullable=False)
     max_out_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     disposition: Mapped[BatchDisposition] = mapped_column(
         Enum(BatchDisposition, native_enum=False), default=BatchDisposition.ACTIVE, nullable=False
@@ -54,6 +73,11 @@ class Batch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     containers: Mapped[list["Container"]] = relationship(back_populates="batch")
+    temperature_observations: Mapped[list["TemperatureObservation"]] = relationship(
+        back_populates="batch"
+    )
+
+    __table_args__ = (CheckConstraint("temp_min_c <= temp_max_c", name="ck_batch_temp_bounds"),)
 
 
 class Container(Base):
@@ -126,8 +150,38 @@ class TimelineEvent(Base):
     batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
     container_id: Mapped[str | None] = mapped_column(ForeignKey("containers.id"), index=True)
     handoff_id: Mapped[str | None] = mapped_column(ForeignKey("handoffs.id"), index=True)
+    observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("temperature_observations.id"), nullable=True
+    )
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index("uq_timeline_event_per_observation", "observation_id", unique=True),
+    )
+
+
+class TemperatureObservation(Base):
+    """One manually measured celsius reading with its batch-bound verdict."""
+
+    __tablename__ = "temperature_observations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
+    container_id: Mapped[str] = mapped_column(
+        ForeignKey("containers.id"), nullable=False, index=True
+    )
+    temperature_c: Mapped[float] = mapped_column(Float, nullable=False)
+    verdict: Mapped[TemperatureVerdict] = mapped_column(
+        Enum(TemperatureVerdict, native_enum=False), nullable=False
+    )
+    measured_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    batch: Mapped[Batch] = relationship(back_populates="temperature_observations")
+    container: Mapped[Container] = relationship(foreign_keys=[container_id])

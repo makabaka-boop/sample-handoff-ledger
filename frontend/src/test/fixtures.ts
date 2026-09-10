@@ -1,4 +1,4 @@
-import type { Batch, Container, Handoff, Location } from "../types";
+import type { Batch, Container, Handoff, Location, TemperatureObservation } from "../types";
 
 let sequence = 0;
 
@@ -42,13 +42,37 @@ export function makeBatch(overrides: Partial<Batch> = {}): Batch {
   return {
     id: uid("batch"),
     accession_number: "BATCH-001",
-    temperature_zone: "2-8C",
+    temperature_zone: "2–8°C",
+    temp_min_c: 2,
+    temp_max_c: 8,
     max_out_minutes: 30,
     disposition: "active",
     created_at: "2026-09-10T08:00:00Z",
     has_unresolved_anomaly: false,
     containers: [makeContainer()],
     timeline: [],
+    temperature_observations: [],
+    ...overrides,
+  };
+}
+
+export function makeObservation(
+  batchId: string,
+  containerId: string,
+  overrides: Partial<TemperatureObservation> = {},
+): TemperatureObservation {
+  return {
+    id: uid("observation"),
+    batch_id: batchId,
+    container_id: containerId,
+    temperature_c: 5,
+    verdict: "normal",
+    measured_by: "night-a",
+    observed_at: "2026-09-10T09:00:00Z",
+    note: null,
+    created_at: "2026-09-10T09:00:05Z",
+    temp_min_c: 2,
+    temp_max_c: 8,
     ...overrides,
   };
 }

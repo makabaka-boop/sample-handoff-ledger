@@ -6,7 +6,8 @@ test("registers a batch through the browser and reads it back from the API", asy
   await page.getByRole("button", { name: "批次档案" }).click();
   await page.getByRole("button", { name: /登记批次/ }).click();
   await page.getByLabel("批次号").fill(`E2E-${suffix}`);
-  await page.getByLabel("温区").fill("2–8°C");
+  await page.getByLabel("温区下限 (°C)").fill("2");
+  await page.getByLabel("温区上限 (°C)").fill("8");
   await page.getByLabel("容器标签").fill("E2E-TUBE");
   await page.getByLabel("登记人").fill("e2e-operator");
   await page.getByRole("button", { name: "保存批次" }).click();

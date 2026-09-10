@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "./api";
 import { createServerCountdown, formatDuration } from "./time";
+import { TemperatureLog, TemperatureObservationForm } from "./temperature";
 import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
 
 type View = "tasks" | "receive" | "batches";
@@ -204,7 +205,8 @@ function NewBatchForm({ locations, onCreated }: { locations: Location[]; onCreat
     try {
       await api.createBatch({
         accession_number: String(data.get("accession")),
-        temperature_zone: String(data.get("zone")),
+        temp_min_c: Number(data.get("temp_min")),
+        temp_max_c: Number(data.get("temp_max")),
         max_out_minutes: Number(data.get("limit")),
         created_by: String(data.get("actor")),
         containers: [{
@@ -223,7 +225,10 @@ function NewBatchForm({ locations, onCreated }: { locations: Location[]; onCreat
     <form className="inline-form" onSubmit={submit}>
       <div className="form-title"><strong>登记新批次</strong><button type="button" onClick={() => setOpen(false)}>×</button></div>
       <label>批次号<input name="accession" required /></label>
-      <label>温区<input name="zone" placeholder="2–8°C" required /></label>
+      <div className="zone-inputs">
+        <label>温区下限 (°C)<input name="temp_min" type="number" step="0.1" defaultValue="2" required /></label>
+        <label>温区上限 (°C)<input name="temp_max" type="number" step="0.1" defaultValue="8" required /></label>
+      </div>
       <label>最长离柜（分钟）<input name="limit" type="number" min="1" defaultValue="30" required /></label>
       <label>容器标签<input name="container" required /></label>
       <label>初始位置<select name="location">{locations.map((l) => <option value={l.code} key={l.id}>{l.name}</option>)}</select></label>
@@ -427,13 +432,23 @@ export function BatchContainers({ batch, onReplaced }: {
               </p>
             )}
             {container.status === "active" && (
-              <ReplaceContainerForm
-                container={container}
-                onReplaced={(detail, newLabel) => {
-                  setNotice(`原容器 ${container.label} 完成封存，新容器 ${newLabel} 继承离柜计时继续交接。`);
-                  onReplaced(detail);
-                }}
-              />
+              <div className="container-actions">
+                <ReplaceContainerForm
+                  container={container}
+                  onReplaced={(detail, newLabel) => {
+                    setNotice(`原容器 ${container.label} 完成封存，新容器 ${newLabel} 继承离柜计时继续交接。`);
+                    onReplaced(detail);
+                  }}
+                />
+                <TemperatureObservationForm
+                  container={container}
+                  batch={batch}
+                  onRecorded={(detail) => {
+                    setNotice("人工测温已按批次温区判定并写入唯一时间线事件。");
+                    onReplaced(detail);
+                  }}
+                />
+              </div>
             )}
           </li>
         ))}
@@ -502,8 +517,9 @@ function DetailDrawer({ handoff, batch, close, refresh, reloadBatch, showCode }:
         </>}
         {batch && <>
           <span className="eyebrow">CHAIN OF CUSTODY</span><h2>{batch.accession_number}</h2>
-          <div className="metric-grid"><Metric label="温区" value={batch.temperature_zone} /><Metric label="批次状态" value={batch.disposition} warning={batch.has_unresolved_anomaly} /></div>
+          <div className="metric-grid"><Metric label="温区" value={`${batch.temp_min_c}–${batch.temp_max_c}°C`} /><Metric label="批次状态" value={batch.disposition} warning={batch.has_unresolved_anomaly} /></div>
           <BatchContainers batch={batch} onReplaced={(detail) => { reloadBatch(detail); refresh(); }} />
+          <TemperatureLog observations={batch.temperature_observations ?? []} />
           <h3 className="timeline-title">完整责任链</h3>
           <ol className="timeline">{batch.timeline?.map((event) => <li key={event.id}><span></span><div><b>{event.event_type.replaceAll("_", " ")}</b><p>{event.actor} · {new Date(event.occurred_at).toLocaleString("zh-CN")}</p>{event.note && <small>{event.note}</small>}</div></li>)}</ol>
         </>}

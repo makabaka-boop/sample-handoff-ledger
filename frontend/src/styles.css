@@ -43,3 +43,20 @@ button.compact, .secondary.compact { margin-top: 10px; padding: 8px 14px; font-s
 .replace-form textarea { border: 1px solid #cad3ce; background: #fbfcfa; padding: 10px; outline: none; font: inherit; resize: vertical; min-height: 48px; }
 .replace-form textarea:focus { border-color: #347a65; box-shadow: 0 0 0 3px #347a6513; }
 .detail-containers .notice { margin: 10px 0 0; }
+
+/* Manual temperature observations */
+.zone-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.container-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.temperature-form { position: static; z-index: auto; width: 100%; box-shadow: none; padding: 12px; border: 1px solid #dce2de; margin-top: 10px; }
+.temperature-form .range-hint { margin: 4px 0; color: #73817c; font-size: 12px; }
+.temperature-form textarea { border: 1px solid #cad3ce; background: #fbfcfa; padding: 10px; outline: none; font: inherit; resize: vertical; min-height: 48px; }
+.temperature-form textarea:focus { border-color: #347a65; box-shadow: 0 0 0 3px #347a6513; }
+.temperature-log ol { list-style: none; padding: 0; margin: 10px 0; display: grid; gap: 10px; }
+.temperature-log li { border: 1px solid #dce2de; background: white; padding: 12px 14px; border-left-width: 4px; }
+.temperature-log li.ok { border-left-color: #2b836a; }
+.temperature-log li.bad { border-left-color: #b9342b; background: #fff7f6; }
+.temp-row { display: flex; justify-content: space-between; align-items: center; }
+.temp-row strong { font: 600 17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.temperature-log p { margin: 6px 0 0; color: #73817c; font-size: 12px; }
+.temperature-log small { color: #935d27; }
+.empty-log { color: #74817d; font-size: 13px; padding: 14px; border: 1px dashed #cbd4cf; background: #ffffff88; }
