@@ -252,6 +252,12 @@ class CancelRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
 
 
+class RerouteRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    to_location_code: str = Field(min_length=1, max_length=40)
+    reason: str = Field(min_length=1, max_length=200)
+
+
 class MarkAnomalyRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
     reason: str = Field(default="HANDOFF_EXPIRED", min_length=1, max_length=80)
@@ -276,6 +282,10 @@ class HandoffRead(BaseModel):
     container_label: str
     from_location: LocationRead
     to_location: LocationRead
+    original_to_location: LocationRead | None = None
+    rerouted_by: str | None = None
+    rerouted_at: datetime | None = None
+    reroute_reason: str | None = None
     created_by: str
     received_by: str | None
     cancelled_by: str | None

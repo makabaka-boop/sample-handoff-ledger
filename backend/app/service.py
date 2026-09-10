@@ -42,6 +42,7 @@ from .schemas import (
     MarkAnomalyRequest,
     RejectRequest,
     ReopenRequest,
+    RerouteRequest,
     ResolveAnomalyRequest,
     TemperatureObservationRead,
     TemperatureObservationRequest,
@@ -163,6 +164,12 @@ def _handoff_read(
         container_label=handoff.container.label,
         from_location=LocationRead.model_validate(handoff.from_location),
         to_location=LocationRead.model_validate(handoff.to_location),
+        original_to_location=LocationRead.model_validate(handoff.original_to_location)
+        if handoff.original_to_location is not None
+        else None,
+        rerouted_by=handoff.rerouted_by,
+        rerouted_at=handoff.rerouted_at,
+        reroute_reason=handoff.reroute_reason,
         created_by=handoff.created_by,
         received_by=handoff.received_by,
         cancelled_by=handoff.cancelled_by,
@@ -729,6 +736,7 @@ def _handoff_query(handoff_id: str):
             selectinload(Handoff.container).selectinload(Container.current_location),
             selectinload(Handoff.from_location),
             selectinload(Handoff.to_location),
+            selectinload(Handoff.original_to_location),
         )
     )
 
@@ -758,6 +766,7 @@ def list_handoffs(db: Session, clock: Clock, status: str | None = None) -> list[
                 selectinload(Handoff.container).selectinload(Container.current_location),
                 selectinload(Handoff.from_location),
                 selectinload(Handoff.to_location),
+                selectinload(Handoff.original_to_location),
             )
             .order_by(Handoff.created_at.desc())
         )
@@ -1023,48 +1032,202 @@ def reject_handoff(
 def cancel_handoff(
     db: Session, handoff_id: str, payload: CancelRequest, clock: Clock
 ) -> HandoffRead:
-    deferred_error: DomainError | None = None
-    with db.begin():
-        handoff = db.scalar(select(Handoff).where(Handoff.id == handoff_id).with_for_update())
-        if handoff is None:
-            raise DomainError(404, "HANDOFF_NOT_FOUND", "Handoff does not exist.")
-        now = clock.now()
-        if handoff.created_by != payload.actor:
-            raise DomainError(403, "NOT_HANDOFF_CREATOR", "Only the initiator may cancel.")
-        if handoff.status == HandoffStatus.CANCELLED:
-            handoff.cancelled_by = handoff.cancelled_by or payload.actor
-        elif handoff.status != HandoffStatus.PENDING:
-            raise DomainError(
-                409, "HANDOFF_NOT_CANCELLABLE", "Only pending handoffs can be cancelled."
+    # Read the immutable digest first so SQLite tests serialise cancel against
+    # confirm/reject/reroute exactly as the PostgreSQL handoff row lock does.
+    digest = db.scalar(select(Handoff.code_digest).where(Handoff.id == handoff_id))
+    if digest is None:
+        raise DomainError(404, "HANDOFF_NOT_FOUND", "Handoff does not exist.")
+    db.rollback()
+    local_lock = _code_action_lock(db, digest)
+    if local_lock:
+        local_lock.acquire()
+    try:
+        deferred_error: DomainError | None = None
+        with db.begin():
+            handoff = db.scalar(
+                select(Handoff).where(Handoff.id == handoff_id).with_for_update()
             )
-        elif _aware(handoff.expires_at) <= now:
-            _mark_anomaly(db, handoff, now, "system", "HANDOFF_EXPIRED")
-            deferred_error = DomainError(
-                409, "HANDOFF_EXPIRED", "Expired handoffs must be reopened or resolved."
+            assert handoff is not None
+            now = clock.now()
+            if handoff.created_by != payload.actor:
+                raise DomainError(403, "NOT_HANDOFF_CREATOR", "Only the initiator may cancel.")
+            if handoff.status == HandoffStatus.CANCELLED:
+                handoff.cancelled_by = handoff.cancelled_by or payload.actor
+            elif handoff.status != HandoffStatus.PENDING:
+                raise DomainError(
+                    409, "HANDOFF_NOT_CANCELLABLE", "Only pending handoffs can be cancelled."
+                )
+            elif _aware(handoff.expires_at) <= now:
+                _mark_anomaly(db, handoff, now, "system", "HANDOFF_EXPIRED")
+                deferred_error = DomainError(
+                    409, "HANDOFF_EXPIRED", "Expired handoffs must be reopened or resolved."
+                )
+            else:
+                handoff.status = HandoffStatus.CANCELLED
+                handoff.cancelled_at = now
+                handoff.cancelled_by = payload.actor
+                container = db.scalar(
+                    select(Container).where(Container.id == handoff.container_id).with_for_update()
+                )
+                source = db.get(Location, handoff.from_location_id)
+                destination = db.get(Location, handoff.to_location_id)
+                assert container is not None and source is not None and destination is not None
+                _settle_return_to_source(container, source, destination, now)
+                _event(
+                    db,
+                    batch_id=handoff.batch_id,
+                    container_id=handoff.container_id,
+                    handoff_id=handoff.id,
+                    event_type="handoff_cancelled",
+                    actor=payload.actor,
+                    at=now,
+                )
+        if deferred_error:
+            raise deferred_error
+        return get_handoff(db, handoff_id, clock)
+    finally:
+        if local_lock:
+            local_lock.release()
+
+
+def reroute_handoff(
+    db: Session, handoff_id: str, payload: RerouteRequest, clock: Clock
+) -> HandoffRead:
+    """Retarget a still-valid pending handoff to another same-environment location.
+
+    The receipt code and the server-side deadline survive untouched: only the
+    destination changes, so the receiver keeps using the original six digits.
+    The reroute takes the same handoff row lock as confirm/reject/cancel, and
+    whichever transaction commits first decides the outcome.
+    """
+    # The digest never changes, so it can be read before the adjudication
+    # transaction opens; on SQLite the per-code lock then serialises reroute
+    # against confirm/reject exactly as the PostgreSQL row lock does.
+    digest = db.scalar(select(Handoff.code_digest).where(Handoff.id == handoff_id))
+    if digest is None:
+        raise DomainError(404, "HANDOFF_NOT_FOUND", "Handoff does not exist.")
+    db.rollback()
+    local_lock = _code_action_lock(db, digest)
+    if local_lock:
+        local_lock.acquire()
+    try:
+        deferred_error: DomainError | None = None
+        with db.begin():
+            handoff = db.scalar(
+                select(Handoff).where(Handoff.id == handoff_id).with_for_update()
             )
-        else:
-            handoff.status = HandoffStatus.CANCELLED
-            handoff.cancelled_at = now
-            handoff.cancelled_by = payload.actor
-            container = db.scalar(
-                select(Container).where(Container.id == handoff.container_id).with_for_update()
-            )
-            source = db.get(Location, handoff.from_location_id)
-            destination = db.get(Location, handoff.to_location_id)
-            assert container is not None and source is not None and destination is not None
-            _settle_return_to_source(container, source, destination, now)
-            _event(
-                db,
-                batch_id=handoff.batch_id,
-                container_id=handoff.container_id,
-                handoff_id=handoff.id,
-                event_type="handoff_cancelled",
-                actor=payload.actor,
-                at=now,
-            )
-    if deferred_error:
-        raise deferred_error
-    return get_handoff(db, handoff_id, clock)
+            assert handoff is not None
+            now = clock.now()
+            if handoff.created_by != payload.actor:
+                raise DomainError(
+                    403, "NOT_HANDOFF_CREATOR", "Only the initiator may reroute."
+                )
+            if handoff.status == HandoffStatus.RECEIVED:
+                raise DomainError(
+                    409,
+                    "HANDOFF_ALREADY_RECEIVED",
+                    "This handoff was already received; it can no longer be rerouted.",
+                )
+            if handoff.status == HandoffStatus.CANCELLED:
+                raise DomainError(409, "HANDOFF_CANCELLED", "This handoff was cancelled.")
+            if (
+                handoff.status == HandoffStatus.ANOMALY
+                and handoff.anomaly_reason == "RECEIVER_REJECTED"
+            ):
+                raise DomainError(
+                    409,
+                    "HANDOFF_REJECTED",
+                    "The receiving shift rejected this handoff; reopen it to issue a new code.",
+                )
+            if handoff.status == HandoffStatus.ANOMALY:
+                raise DomainError(
+                    409,
+                    "HANDOFF_ANOMALY",
+                    "This handoff is anomalous and must be resolved or reopened.",
+                )
+            if _aware(handoff.expires_at) <= now:
+                _mark_anomaly(db, handoff, now, "system", "HANDOFF_EXPIRED")
+                deferred_error = DomainError(
+                    410,
+                    "HANDOFF_EXPIRED",
+                    "The server-side receipt deadline has passed; reopen the handoff.",
+                )
+            else:
+                # Same adjudication order as confirmation: handoff, container, batch.
+                container = db.scalar(
+                    select(Container).where(Container.id == handoff.container_id).with_for_update()
+                )
+                batch = db.scalar(
+                    select(Batch).where(Batch.id == handoff.batch_id).with_for_update()
+                )
+                source = db.get(Location, handoff.from_location_id)
+                current_target = db.get(Location, handoff.to_location_id)
+                assert container is not None and batch is not None
+                assert source is not None and current_target is not None
+                if container.current_location_id != handoff.from_location_id:
+                    raise DomainError(
+                        409,
+                        "LOCATION_MISMATCH",
+                        "The container is no longer at the recorded source.",
+                    )
+                destination = db.scalar(
+                    select(Location).where(Location.code == payload.to_location_code.upper())
+                )
+                if destination is None:
+                    raise DomainError(
+                        404,
+                        "LOCATION_NOT_FOUND",
+                        f"Location '{payload.to_location_code.upper()}' does not exist.",
+                    )
+                if destination.id == source.id:
+                    raise DomainError(
+                        422, "SAME_LOCATION", "The new target must differ from the source."
+                    )
+                if destination.id == current_target.id:
+                    raise DomainError(
+                        422,
+                        "REROUTE_TARGET_UNCHANGED",
+                        "The new target is already the current destination.",
+                    )
+                if destination.is_cold_storage != current_target.is_cold_storage:
+                    raise DomainError(
+                        422,
+                        "REROUTE_ENVIRONMENT_MISMATCH",
+                        "The new target must match the cold-storage class of the current one.",
+                        details={
+                            "current_is_cold_storage": current_target.is_cold_storage,
+                            "requested_is_cold_storage": destination.is_cold_storage,
+                        },
+                    )
+                # The first reroute pins the creation-time target; later
+                # reroutes keep it so the original destination stays on record.
+                if handoff.original_to_location_id is None:
+                    handoff.original_to_location_id = current_target.id
+                handoff.to_location_id = destination.id
+                handoff.rerouted_by = payload.actor
+                handoff.rerouted_at = now
+                handoff.reroute_reason = payload.reason
+                _event(
+                    db,
+                    batch_id=batch.id,
+                    container_id=container.id,
+                    handoff_id=handoff.id,
+                    event_type="handoff_rerouted",
+                    actor=payload.actor,
+                    at=now,
+                    details={
+                        "from": source.code,
+                        "previous_to": current_target.code,
+                        "to": destination.code,
+                        "reason": payload.reason,
+                    },
+                )
+        if deferred_error:
+            raise deferred_error
+        return get_handoff(db, handoff_id, clock)
+    finally:
+        if local_lock:
+            local_lock.release()
 
 
 def mark_anomaly(

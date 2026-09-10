@@ -27,6 +27,7 @@ from .schemas import (
     MarkAnomalyRequest,
     RejectRequest,
     ReopenRequest,
+    RerouteRequest,
     ResolveAnomalyRequest,
     TemperatureObservationRequest,
 )
@@ -49,6 +50,7 @@ from .service import (
     reject_handoff,
     reopen_handoff,
     replace_container,
+    reroute_handoff,
     resolve_anomaly,
 )
 
@@ -176,6 +178,11 @@ def reject(payload: RejectRequest, db: Session = Depends(get_db)):
 @app.post("/api/handoffs/{handoff_id}/cancel", response_model=HandoffRead)
 def cancel(handoff_id: str, payload: CancelRequest, db: Session = Depends(get_db)):
     return cancel_handoff(db, handoff_id, payload, clock)
+
+
+@app.post("/api/handoffs/{handoff_id}/reroute", response_model=HandoffRead)
+def reroute(handoff_id: str, payload: RerouteRequest, db: Session = Depends(get_db)):
+    return reroute_handoff(db, handoff_id, payload, clock)
 
 
 @app.post("/api/handoffs/{handoff_id}/anomaly", response_model=HandoffRead)

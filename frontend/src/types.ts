@@ -116,6 +116,10 @@ export interface Handoff {
   container_label: string;
   from_location: Location;
   to_location: Location;
+  original_to_location: Location | null;
+  rerouted_by: string | null;
+  rerouted_at: string | null;
+  reroute_reason: string | null;
   created_by: string;
   received_by: string | null;
   cancelled_by: string | null;

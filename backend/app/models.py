@@ -124,6 +124,13 @@ class Handoff(Base):
     )
     from_location_id: Mapped[str] = mapped_column(ForeignKey("locations.id"), nullable=False)
     to_location_id: Mapped[str] = mapped_column(ForeignKey("locations.id"), nullable=False)
+    # Reroute provenance; all NULL for handoffs that were never rerouted.
+    original_to_location_id: Mapped[str | None] = mapped_column(
+        ForeignKey("locations.id"), nullable=True
+    )
+    rerouted_by: Mapped[str | None] = mapped_column(String(100))
+    rerouted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reroute_reason: Mapped[str | None] = mapped_column(String(200))
     code_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     created_by: Mapped[str] = mapped_column(String(100), nullable=False)
     received_by: Mapped[str | None] = mapped_column(String(100))
@@ -148,6 +155,9 @@ class Handoff(Base):
     container: Mapped[Container] = relationship(foreign_keys=[container_id])
     from_location: Mapped[Location] = relationship(foreign_keys=[from_location_id])
     to_location: Mapped[Location] = relationship(foreign_keys=[to_location_id])
+    original_to_location: Mapped[Location | None] = relationship(
+        foreign_keys=[original_to_location_id]
+    )
 
 
 class TimelineEvent(Base):

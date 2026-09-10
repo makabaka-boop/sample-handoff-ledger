@@ -458,13 +458,91 @@ export function BatchContainers({ batch, onReplaced }: {
   );
 }
 
-function DetailDrawer({ handoff, batch, close, refresh, reloadBatch, showCode }: {
+export function RerouteForm({ handoff, locations, onRerouted }: {
+  handoff: Handoff;
+  locations: Location[];
+  onRerouted: (handoff: Handoff) => void;
+}) {
+  const [target, setTarget] = useState("");
+  const [actor, setActor] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  // Only another position of the same cold-storage class is a lawful target;
+  // the source and the current destination are excluded up front.
+  const candidates = locations.filter(
+    (location) =>
+      location.is_cold_storage === handoff.to_location.is_cold_storage &&
+      location.id !== handoff.to_location.id &&
+      location.id !== handoff.from_location.id,
+  );
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.reroute(handoff.id, {
+        actor,
+        to_location_code: target,
+        reason,
+      });
+      setTarget("");
+      setReason("");
+      onRerouted(result);
+    } catch (error) {
+      // Failure or offline keeps the operator, reason and chosen position.
+      setError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="inline-form reroute-form" onSubmit={submit}>
+      <div className="form-title"><strong>改派目标</strong></div>
+      <label>新目标位置
+        <select value={target} onChange={(event) => setTarget(event.target.value)} required>
+          <option value="">请选择</option>
+          {candidates.map((location) => (
+            <option value={location.code} key={location.id}>{location.name}</option>
+          ))}
+        </select>
+      </label>
+      <label>改派人
+        <input
+          value={actor}
+          onChange={(event) => setActor(event.target.value)}
+          required
+          maxLength={100}
+        />
+      </label>
+      <label>改派原因
+        <input
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="如：目标处理台临时停用"
+          required
+          maxLength={200}
+        />
+      </label>
+      {error && <div role="alert" className="notice error">{error}</div>}
+      <button className="primary" disabled={busy || !target}>
+        {busy ? "服务器事务处理中…" : "提交改派"}
+      </button>
+    </form>
+  );
+}
+
+export function DetailDrawer({ handoff, batch, close, refresh, reloadBatch, showCode, locations, onRerouted }: {
   handoff: Handoff | null;
   batch: Batch | null;
   close: () => void;
   refresh: () => void;
   reloadBatch: (detail: Batch) => void;
   showCode: string | null;
+  locations: Location[];
+  onRerouted: (handoff: Handoff) => void;
 }) {
   const [actor, setActor] = useState("");
   const [notice, setNotice] = useState("");
@@ -512,8 +590,19 @@ function DetailDrawer({ handoff, batch, close, refresh, reloadBatch, showCode }:
             <dt>拒收原因</dt>
             <dd>{handoff.reject_reason ? rejectReasonLabel[handoff.reject_reason] : "—"}</dd>
             <dt>拒收备注</dt><dd>{handoff.reject_note ?? "—"}</dd>
+            <dt>原目标位置</dt><dd>{handoff.original_to_location?.name ?? "—"}</dd>
+            <dt>改派人</dt>
+            <dd>
+              {handoff.rerouted_by
+                ? `${handoff.rerouted_by}${handoff.rerouted_at ? ` · ${new Date(handoff.rerouted_at).toLocaleString("zh-CN")}` : ""}`
+                : "—"}
+            </dd>
+            <dt>改派原因</dt><dd>{handoff.reroute_reason ?? "—"}</dd>
             <dt>异常原因</dt><dd>{handoff.anomaly_reason ?? "—"}</dd>
           </dl>
+          {handoff.status === "pending" && (
+            <RerouteForm handoff={handoff} locations={locations} onRerouted={onRerouted} />
+          )}
           {(handoff.status === "pending" || handoff.status === "anomaly") && <div className="actions"><input placeholder="操作人" value={actor} onChange={(e) => setActor(e.target.value)} />{handoff.status === "pending" ? <button onClick={() => action("cancel")}>撤销交接</button> : <><button className="primary" onClick={() => action("reopen")}>重开交接</button><select aria-label="异常处置" value={decision} onChange={(e) => setDecision(e.target.value)}><option value="isolate">隔离</option><option value="review">复核</option><option value="release">放行</option></select><input placeholder="处置说明" value={decisionNote} onChange={(e) => setDecisionNote(e.target.value)} /><button disabled={!decisionNote} onClick={() => action("resolve")}>记录处置</button></>}</div>}
         </>}
         {batch && <>
@@ -594,7 +683,12 @@ export default function App() {
         {view === "inventory" && <InventoryPanel locations={locations} />}
         {view === "batches" && <BatchPanel batches={batches} locations={locations} refresh={() => void refresh()} openBatch={(id) => void openBatch(id)} />}
       </main>
-      <DetailDrawer handoff={selectedHandoff} batch={selectedBatch} close={() => { setSelectedHandoff(null); setSelectedBatch(null); setFreshCode(null); }} refresh={() => void refresh()} reloadBatch={setSelectedBatch} showCode={freshCode} />
+      <DetailDrawer handoff={selectedHandoff} batch={selectedBatch} close={() => { setSelectedHandoff(null); setSelectedBatch(null); setFreshCode(null); }} refresh={() => void refresh()} reloadBatch={setSelectedBatch} showCode={freshCode} locations={locations} onRerouted={(result) => {
+        // Apply the adjudicated target at once, then refresh list and timeline.
+        setSelectedHandoff(result);
+        void api.batch(result.batch_id).then(setSelectedBatch).catch(() => setOffline(true));
+        void refresh();
+      }} />
     </div>
   );
 }
