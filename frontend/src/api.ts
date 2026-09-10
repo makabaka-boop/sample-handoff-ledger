@@ -1,4 +1,4 @@
-import type { Batch, Handoff, Location, RejectReason } from "./types";
+import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "/api";
 
@@ -25,6 +25,10 @@ export function errorMessage(error: unknown): string {
     LOCATION_MISMATCH: "容器当前位置与交接来源不一致，请刷新核查。",
     EXPOSURE_LIMIT_EXCEEDED: "样本离柜时长已达上限，请隔离或复核。",
     UNRESOLVED_ANOMALY: "该批次仍有未解决异常，暂不能继续流转。",
+    CONTAINER_ALREADY_REPLACED: "该容器已封存，请使用转装后的新容器继续交接。",
+    HANDOFF_ALREADY_PENDING: "该容器存在待接收交接，请先完成或撤销后再转装。",
+    CONTAINER_LABEL_EXISTS: "批次内已存在相同的容器标签，请换一个新标签。",
+    BATCH_NOT_ACTIVE: "批次当前不可流转，暂不能转装替换。",
     DATABASE_UNAVAILABLE: "数据库暂时不可用，输入已保留，请稍后重试。",
     TRANSACTION_CONFLICT: "同时发生了另一项操作，请刷新后重试。",
   };
@@ -60,6 +64,14 @@ export const api = {
   locations: () => request<Location[]>("/locations"),
   batches: () => request<Batch[]>("/batches"),
   batch: (id: string) => request<Batch>(`/batches/${id}`),
+  replaceContainer: (
+    id: string,
+    data: { new_label: string; actor: string; reason: string; note: string | null },
+  ) =>
+    request<Batch>(`/containers/${id}/replace`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   handoffs: () => request<Handoff[]>("/handoffs"),
   handoff: (id: string) => request<Handoff>(`/handoffs/${id}`),
   confirm: (code: string, receivedBy: string) =>

@@ -27,6 +27,11 @@ class BatchDisposition(str, enum.Enum):
     RELEASED = "released"
 
 
+class ContainerStatus(str, enum.Enum):
+    ACTIVE = "active"
+    REPLACED = "replaced"
+
+
 class Location(Base):
     __tablename__ = "locations"
 
@@ -60,6 +65,17 @@ class Container(Base):
     current_location_id: Mapped[str] = mapped_column(ForeignKey("locations.id"), nullable=False)
     accumulated_out_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     out_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[ContainerStatus] = mapped_column(
+        Enum(ContainerStatus, native_enum=False),
+        default=ContainerStatus.ACTIVE,
+        nullable=False,
+    )
+    replacement_container_id: Mapped[str | None] = mapped_column(
+        ForeignKey("containers.id"), nullable=True
+    )
+    replaced_by: Mapped[str | None] = mapped_column(String(100))
+    replaced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replacement_reason: Mapped[str | None] = mapped_column(String(200))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     batch: Mapped[Batch] = relationship(back_populates="containers")

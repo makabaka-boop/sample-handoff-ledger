@@ -15,6 +15,7 @@ from .schemas import (
     BatchSummary,
     CancelRequest,
     ConfirmRequest,
+    ContainerReplaceRequest,
     HandoffCreate,
     HandoffRead,
     HealthRead,
@@ -39,6 +40,7 @@ from .service import (
     mark_anomaly,
     reject_handoff,
     reopen_handoff,
+    replace_container,
     resolve_anomaly,
 )
 
@@ -90,6 +92,11 @@ def batches(db: Session = Depends(get_db)):
 @app.get("/api/batches/{batch_id}", response_model=BatchDetail)
 def batch_detail(batch_id: str, db: Session = Depends(get_db)):
     return get_batch(db, batch_id, clock)
+
+
+@app.post("/api/containers/{container_id}/replace", response_model=BatchDetail)
+def replace(container_id: str, payload: ContainerReplaceRequest, db: Session = Depends(get_db)):
+    return replace_container(db, container_id, payload, clock)
 
 
 @app.post("/api/handoffs", response_model=HandoffRead, status_code=status.HTTP_201_CREATED)

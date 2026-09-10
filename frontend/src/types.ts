@@ -6,6 +6,8 @@ export interface Location {
   name: string;
   is_cold_storage: boolean;
 }
+export type ContainerStatus = "active" | "replaced";
+
 export interface Container {
   id: string;
   label: string;
@@ -17,6 +19,11 @@ export interface Container {
   exposure_exceeded: boolean;
   out_since: string | null;
   updated_at: string;
+  status: ContainerStatus;
+  replacement_container_id: string | null;
+  replaced_by: string | null;
+  replaced_at: string | null;
+  replacement_reason: string | null;
 }
 
 export interface Batch {

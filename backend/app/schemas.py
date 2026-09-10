@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .models import BatchDisposition, HandoffStatus
+from .models import BatchDisposition, ContainerStatus, HandoffStatus
 
 
 class LocationCreate(BaseModel):
@@ -50,6 +50,25 @@ class ContainerRead(BaseModel):
     exposure_exceeded: bool
     out_since: datetime | None
     updated_at: datetime
+    status: ContainerStatus
+    replacement_container_id: str | None
+    replaced_by: str | None
+    replaced_at: datetime | None
+    replacement_reason: str | None
+
+
+class ContainerReplaceRequest(BaseModel):
+    new_label: str = Field(min_length=1, max_length=100)
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("note")
+    @classmethod
+    def empty_note_to_none(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            return None
+        return value
 
 
 class BatchSummary(BaseModel):

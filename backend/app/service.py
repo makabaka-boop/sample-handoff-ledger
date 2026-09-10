@@ -13,6 +13,7 @@ from .models import (
     Batch,
     BatchDisposition,
     Container,
+    ContainerStatus,
     Handoff,
     HandoffStatus,
     Location,
@@ -25,6 +26,7 @@ from .schemas import (
     CancelRequest,
     ConfirmRequest,
     ContainerRead,
+    ContainerReplaceRequest,
     HandoffCreate,
     HandoffRead,
     LocationRead,
@@ -100,6 +102,11 @@ def _container_read(container: Container, batch: Batch, now: datetime) -> Contai
         exposure_exceeded=total >= limit,
         out_since=container.out_since,
         updated_at=container.updated_at,
+        status=container.status,
+        replacement_container_id=container.replacement_container_id,
+        replaced_by=container.replaced_by,
+        replaced_at=container.replaced_at,
+        replacement_reason=container.replacement_reason,
     )
 
 
@@ -330,6 +337,119 @@ def get_batch(
     )
 
 
+def _container_action_lock(db: Session, key: str) -> threading.Lock | None:
+    # SQLite serializes writers poorly under threads; mirror the receipt-code lock
+    # so concurrent adjudications on one container remain deterministic in tests.
+    if db.bind is None or db.bind.dialect.name != "sqlite":
+        return None
+    with _sqlite_locks_guard:
+        return _sqlite_code_action_locks.setdefault(f"container:{key}", threading.Lock())
+
+
+def replace_container(
+    db: Session,
+    container_id: str,
+    payload: ContainerReplaceRequest,
+    clock: Clock,
+) -> BatchDetail:
+    """Transload a damaged physical container: seal the old record, create an
+    active successor that inherits position and exposure timing."""
+    local_lock = _container_action_lock(db, container_id)
+    if local_lock:
+        local_lock.acquire()
+    try:
+        now = clock.now()
+        with db.begin():
+            # Same adjudication order as handoffs: container first, then batch.
+            old = db.scalar(
+                select(Container).where(Container.id == container_id).with_for_update()
+            )
+            if old is None:
+                raise DomainError(404, "CONTAINER_NOT_FOUND", "Container does not exist.")
+            if old.status == ContainerStatus.REPLACED:
+                raise DomainError(
+                    409,
+                    "CONTAINER_ALREADY_REPLACED",
+                    "This container was already sealed after transloading.",
+                )
+            batch = db.scalar(select(Batch).where(Batch.id == old.batch_id).with_for_update())
+            assert batch is not None
+            if batch.disposition != BatchDisposition.ACTIVE:
+                raise DomainError(
+                    409,
+                    "BATCH_NOT_ACTIVE",
+                    "The batch must be active before its containers can be transloaded.",
+                    details={"disposition": batch.disposition.value},
+                )
+            pending = db.scalar(
+                select(Handoff.id).where(
+                    Handoff.container_id == old.id,
+                    Handoff.status == HandoffStatus.PENDING,
+                )
+            )
+            if pending:
+                raise DomainError(
+                    409,
+                    "HANDOFF_ALREADY_PENDING",
+                    "Receive or cancel the pending handoff before replacing the container.",
+                )
+            label_taken = db.scalar(
+                select(Container.id).where(
+                    Container.batch_id == batch.id,
+                    func.lower(Container.label) == payload.new_label.casefold(),
+                )
+            )
+            if label_taken:
+                raise DomainError(
+                    409,
+                    "CONTAINER_LABEL_EXISTS",
+                    "That label is already used by a container in this batch.",
+                    details={"label": payload.new_label},
+                )
+            successor = Container(
+                batch_id=batch.id,
+                label=payload.new_label,
+                current_location_id=old.current_location_id,
+                # Timing continuity: the exposure clock never resets at transload.
+                accumulated_out_seconds=old.accumulated_out_seconds,
+                out_since=old.out_since,
+                status=ContainerStatus.ACTIVE,
+                updated_at=now,
+            )
+            db.add(successor)
+            db.flush()
+            old.status = ContainerStatus.REPLACED
+            old.replacement_container_id = successor.id
+            old.replaced_by = payload.actor
+            old.replaced_at = now
+            old.replacement_reason = payload.reason
+            old.updated_at = now
+            _event(
+                db,
+                batch_id=batch.id,
+                container_id=old.id,
+                event_type="container_replaced",
+                actor=payload.actor,
+                at=now,
+                details={
+                    "old_label": old.label,
+                    "new_label": successor.label,
+                    "new_container_id": successor.id,
+                    "reason": payload.reason,
+                    "accumulated_out_seconds": successor.accumulated_out_seconds,
+                    "out_since": successor.out_since.isoformat()
+                    if successor.out_since
+                    else None,
+                },
+                note=payload.note,
+            )
+            batch_id = batch.id
+    finally:
+        if local_lock:
+            local_lock.release()
+    return get_batch(db, batch_id, clock)
+
+
 def _fresh_code(db: Session, signing_key: str) -> tuple[str, str]:
     for _ in range(20):
         code = generate_code()
@@ -401,6 +521,13 @@ def create_handoff(
         )
         if container is None:
             raise DomainError(404, "CONTAINER_NOT_FOUND", "Container does not exist.")
+        if container.status == ContainerStatus.REPLACED:
+            raise DomainError(
+                409,
+                "CONTAINER_ALREADY_REPLACED",
+                "This container was sealed after transloading; use the replacement container.",
+                details={"replacement_container_id": container.replacement_container_id},
+            )
         batch = db.scalar(select(Batch).where(Batch.id == container.batch_id).with_for_update())
         assert batch is not None
         if _has_unresolved_anomaly(db, batch.id, now):

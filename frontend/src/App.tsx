@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, errorMessage } from "./api";
 import { createServerCountdown, formatDuration } from "./time";
-import type { Batch, Handoff, Location, RejectReason } from "./types";
+import type { Batch, Container, Handoff, Location, RejectReason } from "./types";
 
 type View = "tasks" | "receive" | "batches";
 type ReceiveMode = "confirm" | "reject";
@@ -234,7 +234,7 @@ function NewBatchForm({ locations, onCreated }: { locations: Location[]; onCreat
   );
 }
 
-function NewHandoffForm({ batches, locations, onCreated }: {
+export function NewHandoffForm({ batches, locations, onCreated }: {
   batches: Batch[];
   locations: Location[];
   onCreated: (handoff: Handoff) => void;
@@ -242,7 +242,12 @@ function NewHandoffForm({ batches, locations, onCreated }: {
   const [open, setOpen] = useState(false);
   const [containerId, setContainerId] = useState("");
   const [notice, setNotice] = useState("");
-  const containers = batches.flatMap((batch) => batch.containers.map((container) => ({ batch, container })));
+  // Sealed containers stay on record for the chain of custody but cannot circulate.
+  const containers = batches.flatMap((batch) =>
+    batch.containers
+      .filter((container) => container.status === "active")
+      .map((container) => ({ batch, container })),
+  );
   const chosen = containers.find(({ container }) => container.id === containerId);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -308,11 +313,141 @@ function BatchPanel({ batches, locations, refresh, openBatch }: {
   );
 }
 
-function DetailDrawer({ handoff, batch, close, refresh, showCode }: {
+export function ReplaceContainerForm({ container, onReplaced }: {
+  container: Container;
+  onReplaced: (detail: Batch, newLabel: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [actor, setActor] = useState("");
+  const [reason, setReason] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const detail = await api.replaceContainer(container.id, {
+        new_label: newLabel,
+        actor,
+        reason,
+        note: note.trim() ? note : null,
+      });
+      setOpen(false);
+      onReplaced(detail, newLabel);
+    } catch (error) {
+      // The transaction rolled back; keep every field so the recount can fix and retry.
+      setError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button className="secondary compact" type="button" onClick={() => setOpen(true)}>
+        转装替换
+      </button>
+    );
+  }
+  return (
+    <form className="inline-form replace-form" onSubmit={submit}>
+      <div className="form-title">
+        <strong>转装替换 {container.label}</strong>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setError(""); }}
+        >×</button>
+      </div>
+      <label>新容器标签
+        <input
+          value={newLabel}
+          onChange={(event) => setNewLabel(event.target.value)}
+          required
+          maxLength={100}
+          autoFocus
+        />
+      </label>
+      <label>操作人
+        <input value={actor} onChange={(event) => setActor(event.target.value)} required maxLength={100} />
+      </label>
+      <label>替换原因
+        <input
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          placeholder="如：容器破裂、封签脱落"
+          required
+          maxLength={200}
+        />
+      </label>
+      <label>备注
+        <textarea
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          maxLength={2000}
+          rows={2}
+        />
+      </label>
+      {error && <div role="alert" className="notice error">{error}</div>}
+      <button className="primary" disabled={busy}>{busy ? "服务器事务处理中…" : "封存原容器并转装"}</button>
+    </form>
+  );
+}
+
+export function BatchContainers({ batch, onReplaced }: {
+  batch: Batch;
+  onReplaced: (detail: Batch) => void;
+}) {
+  const [notice, setNotice] = useState("");
+  return (
+    <div className="detail-containers">
+      <h3 className="timeline-title">容器</h3>
+      {notice && <div role="status" className="notice ok">{notice}</div>}
+      <ul>
+        {batch.containers.map((container) => (
+          <li key={container.id}>
+            <div className="detail-container-row">
+              <span>
+                <b>{container.label}</b>
+                <small>{container.current_location.name} · 离柜 {formatDuration(container.total_out_seconds)}</small>
+              </span>
+              {container.status === "active" ? (
+                <span className="status-pill received">可流转</span>
+              ) : (
+                <span className="status-pill cancelled">已封存</span>
+              )}
+            </div>
+            {container.status === "replaced" && (
+              <p className="replaced-meta">
+                {container.replaced_by} 于 {new Date(container.replaced_at ?? "").toLocaleString("zh-CN")}
+                封存 · 原因：{container.replacement_reason}
+              </p>
+            )}
+            {container.status === "active" && (
+              <ReplaceContainerForm
+                container={container}
+                onReplaced={(detail, newLabel) => {
+                  setNotice(`原容器 ${container.label} 完成封存，新容器 ${newLabel} 继承离柜计时继续交接。`);
+                  onReplaced(detail);
+                }}
+              />
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DetailDrawer({ handoff, batch, close, refresh, reloadBatch, showCode }: {
   handoff: Handoff | null;
   batch: Batch | null;
   close: () => void;
   refresh: () => void;
+  reloadBatch: (detail: Batch) => void;
   showCode: string | null;
 }) {
   const [actor, setActor] = useState("");
@@ -368,6 +503,7 @@ function DetailDrawer({ handoff, batch, close, refresh, showCode }: {
         {batch && <>
           <span className="eyebrow">CHAIN OF CUSTODY</span><h2>{batch.accession_number}</h2>
           <div className="metric-grid"><Metric label="温区" value={batch.temperature_zone} /><Metric label="批次状态" value={batch.disposition} warning={batch.has_unresolved_anomaly} /></div>
+          <BatchContainers batch={batch} onReplaced={(detail) => { reloadBatch(detail); refresh(); }} />
           <h3 className="timeline-title">完整责任链</h3>
           <ol className="timeline">{batch.timeline?.map((event) => <li key={event.id}><span></span><div><b>{event.event_type.replaceAll("_", " ")}</b><p>{event.actor} · {new Date(event.occurred_at).toLocaleString("zh-CN")}</p>{event.note && <small>{event.note}</small>}</div></li>)}</ol>
         </>}
@@ -440,7 +576,7 @@ export default function App() {
         {view === "receive" && <ReceivePanel onDone={() => void refresh()} />}
         {view === "batches" && <BatchPanel batches={batches} locations={locations} refresh={() => void refresh()} openBatch={(id) => void openBatch(id)} />}
       </main>
-      <DetailDrawer handoff={selectedHandoff} batch={selectedBatch} close={() => { setSelectedHandoff(null); setSelectedBatch(null); setFreshCode(null); }} refresh={() => void refresh()} showCode={freshCode} />
+      <DetailDrawer handoff={selectedHandoff} batch={selectedBatch} close={() => { setSelectedHandoff(null); setSelectedBatch(null); setFreshCode(null); }} refresh={() => void refresh()} reloadBatch={setSelectedBatch} showCode={freshCode} />
     </div>
   );
 }
