@@ -257,3 +257,73 @@ test("blank lines inside or at the end of the scan are rejected with no record",
   ).json();
   expect(checks).toHaveLength(1);
 });
+
+test("two same-label containers in one cabinet count one matched and one missing on a single scan", async ({
+  page,
+  request,
+}) => {
+  const suffix = (Date.now() + 3).toString();
+  const location = await createColdLocation(request, suffix);
+  // Labels are only unique within a batch, so two batches may place one
+  // same-label container each in the same cabinet.
+  await createBatch(request, `INV-E2E-E1-${suffix}`, ["INV-DUP"], location.code);
+  await createBatch(request, `INV-E2E-E2-${suffix}`, ["INV-DUP"], location.code);
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "位置盘点" }).click();
+  await page.getByLabel("冷藏位置").selectOption({ label: `${location.name}（${location.code}）` });
+  await page.getByLabel("盘点人").fill("night-e");
+  await page.getByLabel("容器标签（每行一个，按扫描顺序）").fill("INV-DUP");
+  await page.getByRole("button", { name: "提交盘点" }).click();
+
+  await expect(page.getByTestId("count-matched")).toHaveText("1");
+  // The second, physically-present same-label container was never scanned.
+  await expect(page.getByTestId("count-missing")).toHaveText("1");
+  await expect(page.getByText("账面在柜、扫描未见")).toBeVisible();
+
+  const checks = await (
+    await request.get(`${API_URL}/locations/${location.id}/inventory-checks`)
+  ).json();
+  expect(checks).toHaveLength(1);
+  expect(checks[0].matched_count).toBe(1);
+  expect(checks[0].missing_count).toBe(1);
+  const detail = await (
+    await request.get(`${API_URL}/inventory-checks/${checks[0].id}`)
+  ).json();
+  const categories = detail.items.map(
+    (item: { category: string }) => item.category,
+  );
+  expect(categories).toEqual(["matched", "missing"]);
+  expect(
+    detail.items.every(
+      (item: { container_label: string }) => item.container_label === "INV-DUP",
+    ),
+  ).toBeTruthy();
+});
+
+test("a spaces-only checker is rejected with the inputs preserved and no record", async ({
+  page,
+  request,
+}) => {
+  const suffix = (Date.now() + 4).toString();
+  const location = await createColdLocation(request, suffix);
+  await createBatch(request, `INV-E2E-F-${suffix}`, ["INV-F1"], location.code);
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "位置盘点" }).click();
+  await page.getByLabel("冷藏位置").selectOption({ label: `${location.name}（${location.code}）` });
+  await page.getByLabel("盘点人").fill("   ");
+  await page.getByLabel("容器标签（每行一个，按扫描顺序）").fill("INV-F1");
+  await page.getByRole("button", { name: "提交盘点" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("盘点人无效");
+  await expect(page.getByRole("heading", { name: "本次盘点结果" })).toHaveCount(0);
+  // The raw inputs stay in the form for correction.
+  await expect(page.getByLabel("盘点人")).toHaveValue("   ");
+  await expect(page.getByLabel("容器标签（每行一个，按扫描顺序）")).toHaveValue("INV-F1");
+
+  const checksResponse = await request.get(
+    `${API_URL}/locations/${location.id}/inventory-checks`,
+  );
+  expect(await checksResponse.json()).toHaveLength(0);
+});

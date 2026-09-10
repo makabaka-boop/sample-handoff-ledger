@@ -1230,22 +1230,25 @@ def _inventory_summary(check: LocationInventoryCheck) -> InventoryCheckSummary:
 
 
 def _recent_check_summaries(
-    db: Session, location_id: str, *, before: datetime | None = None
+    db: Session,
+    location_id: str,
+    *,
+    before_sequence: int | None = None,
 ) -> list[LocationInventoryCheck]:
     statement = (
         select(LocationInventoryCheck)
         .where(LocationInventoryCheck.location_id == location_id)
         .options(selectinload(LocationInventoryCheck.location))
-        .order_by(
-            LocationInventoryCheck.created_at.desc(),
-            LocationInventoryCheck.id.desc(),
-        )
+        .order_by(LocationInventoryCheck.sequence_number.desc())
         .limit(10)
     )
-    if before is not None:
+    if before_sequence is not None:
         # Only records already visible at submission time, so re-reading an
-        # immutable check never surfaces checks created afterwards.
-        statement = statement.where(LocationInventoryCheck.created_at < before)
+        # immutable check never surfaces checks created afterwards. Sequence is
+        # total per location even when several checks share one created_at.
+        statement = statement.where(
+            LocationInventoryCheck.sequence_number < before_sequence
+        )
     return list(db.scalars(statement))
 
 
@@ -1261,7 +1264,15 @@ def create_inventory_check(
     modified.
     """
     # Payload verification happens before the transaction opens, so a rejected
-    # submission (blank or duplicate labels) never touches the database.
+    # submission (blank checker or blank/duplicate labels) never touches the
+    # database.
+    checked_by = payload.checked_by.strip()
+    if not checked_by:
+        raise DomainError(
+            422,
+            "INVALID_INVENTORY_CHECKED_BY",
+            "checked_by must name the person performing the recount.",
+        )
     labels = [label.strip() for label in payload.labels]
     folded_counts = Counter(label.casefold() for label in labels)
     if any(not label for label in labels) or any(count > 1 for count in folded_counts.values()):
@@ -1337,12 +1348,17 @@ def create_inventory_check(
                 for batch in db.scalars(select(Batch).where(Batch.id.in_(all_batch_ids)))
             }
 
-            scanned_folded = {label.casefold() for label in labels}
-
             def make_item(category: InventoryCheckCategory, **fields) -> LocationInventoryCheckItem:
                 return LocationInventoryCheckItem(category=category, **fields)
 
             rows: list[LocationInventoryCheckItem] = []
+
+            # Containers the scan actually accounted for here. A scanned label
+            # resolves to exactly one book container, so two book containers
+            # sharing a label (allowed across batches) only clear one of them:
+            # the other must remain a book-missing row even though the label was
+            # scanned.
+            matched_here_ids: set[str] = set()
 
             # Scanned labels, in scan order.
             for line, label in enumerate(labels, start=1):
@@ -1364,6 +1380,7 @@ def create_inventory_check(
                 batch = all_batches[chosen.batch_id]
                 if chosen.current_location_id == location.id:
                     category = InventoryCheckCategory.MATCHED
+                    matched_here_ids.add(chosen.id)
                 else:
                     category = InventoryCheckCategory.MISPLACED
                 rows.append(
@@ -1384,7 +1401,7 @@ def create_inventory_check(
             # Book containers at this location that the scan did not list.
             missing_line = 0
             for container in at_location:
-                if container.label.casefold() in scanned_folded:
+                if container.id in matched_here_ids:
                     continue
                 missing_line += 1
                 batch = batches[container.batch_id]
@@ -1407,9 +1424,19 @@ def create_inventory_check(
             for item in rows:
                 counts[item.category] += 1
 
+            # The location row is already locked, so the per-location sequence is
+            # gapless and free of races even when created_at ties.
+            last_sequence = db.scalar(
+                select(func.max(LocationInventoryCheck.sequence_number)).where(
+                    LocationInventoryCheck.location_id == location.id
+                )
+            )
+            sequence_number = (last_sequence or 0) + 1
+
             check = LocationInventoryCheck(
                 location_id=location.id,
-                checked_by=payload.checked_by,
+                checked_by=checked_by,
+                sequence_number=sequence_number,
                 created_at=now,
                 matched_count=counts[InventoryCheckCategory.MATCHED],
                 missing_count=counts[InventoryCheckCategory.MISSING],
@@ -1441,8 +1468,10 @@ def get_inventory_check(db: Session, check_id: str) -> InventoryCheckRead:
     )
     if check is None:
         raise DomainError(404, "INVENTORY_CHECK_NOT_FOUND", "Inventory check does not exist.")
-    recent = _recent_check_summaries(db, check.location_id, before=check.created_at)
-    summaries = [_inventory_summary(item) for item in recent if item.id != check.id]
+    recent = _recent_check_summaries(
+        db, check.location_id, before_sequence=check.sequence_number
+    )
+    summaries = [_inventory_summary(item) for item in recent]
     return InventoryCheckRead(
         **_inventory_summary(check).model_dump(),
         items=sorted(

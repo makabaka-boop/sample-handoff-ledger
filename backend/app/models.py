@@ -206,6 +206,10 @@ class LocationInventoryCheck(Base):
         ForeignKey("locations.id"), nullable=False, index=True
     )
     checked_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Gapless, per-location submission order. created_at alone cannot order checks
+    # whose server clock returns the same instant (or freezes): the sequence is
+    # assigned while the location row is locked and makes "before/after" total.
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     matched_count: Mapped[int] = mapped_column(Integer, nullable=False)
     missing_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -216,6 +220,15 @@ class LocationInventoryCheck(Base):
     location: Mapped[Location] = relationship()
     items: Mapped[list["LocationInventoryCheckItem"]] = relationship(
         back_populates="check", cascade="all"
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_inventory_check_location_sequence",
+            "location_id",
+            "sequence_number",
+            unique=True,
+        ),
     )
 
 

@@ -160,6 +160,56 @@ describe("inventory panel", () => {
     expect(checker()).toHaveValue("night-a");
   });
 
+  it("rejects a spaces-only checker before any request and keeps the inputs", async () => {
+    const spy = vi.spyOn(api, "submitInventoryCheck");
+    render(<InventoryPanel locations={[fridge]} />);
+
+    fireEvent.change(checker(), { target: { value: "   " } });
+    fireEvent.change(labels(), { target: { value: "TUBE-A\nTUBE-B" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("盘点人无效"));
+    expect(spy).not.toHaveBeenCalled();
+    // Both the invalid checker and the valid scan stay in the form.
+    expect(checker()).toHaveValue("   ");
+    expect(labels()).toHaveValue("TUBE-A\nTUBE-B");
+    expect(screen.queryByRole("heading", { name: "本次盘点结果" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the inputs after INVALID_INVENTORY_CHECKED_BY and shows the mapped message", async () => {
+    vi.spyOn(api, "submitInventoryCheck").mockRejectedValue(
+      new ApiError("INVALID_INVENTORY_CHECKED_BY", "blank checker", false, "trace-by"),
+    );
+    render(<InventoryPanel locations={[fridge]} />);
+
+    fireEvent.change(checker(), { target: { value: "night-a" } });
+    fireEvent.change(labels(), { target: { value: "TUBE-A\nTUBE-B" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent("不能只有空格"),
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("trace-by");
+    expect(labels()).toHaveValue("TUBE-A\nTUBE-B");
+    expect(checker()).toHaveValue("night-a");
+  });
+
+  it("sends the checker name without surrounding whitespace", async () => {
+    const result = makeInventoryResult();
+    const spy = vi.spyOn(api, "submitInventoryCheck").mockResolvedValue(result);
+    render(<InventoryPanel locations={[fridge]} />);
+
+    fireEvent.change(checker(), { target: { value: "  night-a  " } });
+    fireEvent.change(labels(), { target: { value: "TUBE-A" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交盘点" }));
+
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    expect(spy).toHaveBeenCalledWith("loc-fridge", {
+      checked_by: "night-a",
+      labels: ["TUBE-A"],
+    });
+  });
+
   it("blocks duplicate labels client-side before any request", async () => {
     const spy = vi.spyOn(api, "submitInventoryCheck");
     render(<InventoryPanel locations={[fridge]} />);

@@ -328,3 +328,179 @@ def test_pending_handoff_leaves_container_in_fridge_snapshot_until_confirmation(
     assert result.status_code == 201, result.text
     assert result.json()["matched_count"] == 1
     assert all_check_rows() == (1, 1)
+
+
+def test_scanning_one_of_two_same_label_containers_at_location_marks_other_missing(
+    client,
+):
+    # Duplicate labels are allowed across batches (only forbidden within one).
+    first = make_batch(client, "INV-DUP-LABEL-1", ["SAME-LABEL"])
+    second = make_batch(client, "INV-DUP-LABEL-2", ["SAME-LABEL"])
+    assert [c["current_location"]["code"] for c in first["containers"]] == ["FRIDGE"]
+    assert [c["current_location"]["code"] for c in second["containers"]] == ["FRIDGE"]
+
+    response = submit_check(client, location_id(client, "FRIDGE"), labels=["SAME-LABEL"])
+    assert response.status_code == 201, response.text
+    data = response.json()
+
+    # One scanned label resolves to exactly one book container (matched); the
+    # other same-label container was physically present on the book but never
+    # scanned, so it must count as a book-missing row.
+    assert data["matched_count"] == 1
+    assert data["missing_count"] == 1
+    assert data["misplaced_count"] == 0
+    assert data["unknown_count"] == 0
+
+    matched_ids = [
+        item["container_id"]
+        for item in data["items"]
+        if item["category"] == "matched"
+    ]
+    missing = [item for item in data["items"] if item["category"] == "missing"]
+    assert len(matched_ids) == 1
+    assert len(missing) == 1
+    assert missing[0]["container_label"] == "SAME-LABEL"
+    assert missing[0]["recorded_location_code"] == "FRIDGE"
+    book_ids = {first["containers"][0]["id"], second["containers"][0]["id"]}
+    assert set(matched_ids) | {missing[0]["container_id"]} == book_ids
+    assert set(matched_ids) & {missing[0]["container_id"]} == set()
+
+    # Exactly two detail rows: one matched, one missing.
+    assert all_check_rows() == (1, 2)
+
+
+def test_second_submission_at_frozen_server_time_carries_the_first_check_as_recent(
+    client,
+    mutable_clock,
+    monkeypatch,
+):
+    # A fixed server-side time (e.g. a frozen clock) must not make the second
+    # recount believe it has no predecessor.
+    monkeypatch.setattr(clock, "now", mutable_clock.now)
+    make_batch(client, "INV-FROZEN", ["A1", "A2"])
+    fridge = location_id(client, "FRIDGE")
+
+    first = submit_check(client, fridge, labels=["A1"], by="night-a")
+    assert first.status_code == 201, first.text
+    first_data = first.json()
+    assert first_data["recent_checks"] == []
+
+    second = submit_check(client, fridge, labels=["A1", "A2"], by="night-a")
+    assert second.status_code == 201, second.text
+    second_data = second.json()
+    assert second_data["created_at"] == first_data["created_at"]
+    assert [row["id"] for row in second_data["recent_checks"]] == [first_data["id"]]
+
+    # Submitting a third time without advancing the clock still chains correctly.
+    third = submit_check(client, fridge, labels=["A2"], by="night-b")
+    assert third.status_code == 201, third.text
+    third_data = third.json()
+    assert [row["id"] for row in third_data["recent_checks"]] == [
+        second_data["id"],
+        first_data["id"],
+    ]
+
+    # The earlier immutable checks never gain later records when re-read.
+    first_reread = client.get(f"/api/inventory-checks/{first_data['id']}").json()
+    assert first_reread["recent_checks"] == []
+    second_reread = client.get(f"/api/inventory-checks/{second_data['id']}").json()
+    assert [row["id"] for row in second_reread["recent_checks"]] == [first_data["id"]]
+
+    # The listing orders by submission sequence too.
+    listing = client.get(f"/api/locations/{fridge}/inventory-checks").json()
+    assert [row["id"] for row in listing] == [
+        third_data["id"],
+        second_data["id"],
+        first_data["id"],
+    ]
+
+
+def test_blank_checked_by_is_rejected_before_transaction_and_nothing_is_persisted(
+    client,
+):
+    make_batch(client, "INV-BLANK-BY", ["A1"])
+    fridge = location_id(client, "FRIDGE")
+
+    for checker in ("   ", "\t", " \n "):
+        response = submit_check(client, fridge, labels=["A1"], by=checker)
+        assert response.status_code == 422, checker
+        assert response.json()["error"]["code"] == "INVALID_INVENTORY_CHECKED_BY"
+    # A valid checker still succeeds and is stored without surrounding spaces.
+    response = submit_check(client, fridge, labels=["A1"], by="  night-a ")
+    assert response.status_code == 201, response.text
+    assert response.json()["checked_by"] == "night-a"
+    checks, _items = all_check_rows()
+    assert checks == 1
+
+
+def test_sequence_migration_backfills_per_location_gapless_and_downgrades(
+    tmp_path,
+    monkeypatch,
+):
+    from alembic import command
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as sql_text
+
+    from app.config import get_settings
+
+    from .test_temperature_observations import _alembic_config
+
+    db_path = tmp_path / "migration-inventory-sequence.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{db_path}")
+    get_settings.cache_clear()
+    cfg = _alembic_config(db_path)
+    command.upgrade(cfg, "20260910_0005")
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}")
+
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "INSERT INTO locations (id, code, name, is_cold_storage) "
+                "VALUES ('loc-1', 'FRZ1', '冷冻柜1', 1), ('loc-2', 'FRZ2', '冷冻柜2', 1)"
+            )
+        )
+        stamp = "2026-09-10T10:00:00+00:00"
+
+        def insert_check(check_id: str, location_id: str) -> None:
+            conn.execute(
+                sql_text(
+                    "INSERT INTO location_inventory_checks (id, location_id, checked_by, "
+                    "created_at, matched_count, missing_count, misplaced_count, "
+                    "unknown_count, scanned_count) VALUES (:id, :loc, 'night-a', :at, "
+                    "0, 0, 0, 0, 0)"
+                ),
+                {"id": check_id, "loc": location_id, "at": stamp},
+            )
+
+        # Two checks share one created_at at loc-1; loc-2 has an independent run.
+        insert_check("check-a", "loc-1")
+        insert_check("check-b", "loc-1")
+        insert_check("check-c", "loc-2")
+
+    command.upgrade(cfg, "20260910_0006")
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sql_text(
+                "SELECT id, sequence_number FROM location_inventory_checks "
+                "ORDER BY location_id, sequence_number"
+            )
+        ).all()
+        assert [tuple(row) for row in rows] == [
+            ("check-a", 1),
+            ("check-b", 2),
+            ("check-c", 1),
+        ]
+        columns = {
+            row[1]
+            for row in conn.execute(sql_text("PRAGMA table_info(location_inventory_checks)"))
+        }
+        assert "sequence_number" in columns
+
+    command.downgrade(cfg, "20260910_0005")
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(sql_text("PRAGMA table_info(location_inventory_checks)"))
+        }
+        assert "sequence_number" not in columns
+    get_settings.cache_clear()

@@ -47,6 +47,7 @@ export function errorMessage(error: unknown): string {
     INVALID_OBSERVED_AT: "测量时间无效：不能晚于当前时间，也不能早于批次创建时间。",
     TEMPERATURE_OUT_OF_RANGE: "测温结果超出批次温区，批次已进入复核。",
     INVALID_INVENTORY_LABELS: "标签清单无效：不能包含空白或重复标签，请核对后重新扫描。",
+    INVALID_INVENTORY_CHECKED_BY: "盘点人无效：请填写实际盘点人员姓名，不能只有空格。",
     LOCATION_NOT_COLD_STORAGE: "该位置不是冷藏位置，不能提交盘点。",
     DATABASE_UNAVAILABLE: "数据库暂时不可用，输入已保留，请稍后重试。",
     TRANSACTION_CONFLICT: "同时发生了另一项操作，请刷新后重试。",

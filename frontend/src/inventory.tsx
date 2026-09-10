@@ -193,6 +193,11 @@ export function InventoryPanel({ locations }: { locations: Location[] }) {
     event.preventDefault();
     const blankLines = blankLabelLines(labelText);
     const labels = parseScannedLabels(labelText);
+    if (!checkedBy.trim()) {
+      // A spaces-only checker must not reach the server and be stored blank.
+      setError("盘点人无效：请填写实际盘点人员姓名，不能只有空格。");
+      return;
+    }
     if (!labels.length) {
       setError("请先扫描至少一个容器标签。");
       return;
@@ -215,7 +220,7 @@ export function InventoryPanel({ locations }: { locations: Location[] }) {
     setError("");
     try {
       const next = await api.submitInventoryCheck(locationId, {
-        checked_by: checkedBy,
+        checked_by: checkedBy.trim(),
         labels,
       });
       setResult(next);
